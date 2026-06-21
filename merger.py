@@ -11,7 +11,7 @@ from probe import VideoInfo
 
 
 def default_output_path(input_folder: Path) -> Path:
-    output_dir = input_folder.parent / "output"
+    output_dir = input_folder / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
     return output_dir / f"merged{timestamp}.mp4"

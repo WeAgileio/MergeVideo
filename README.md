@@ -1,15 +1,23 @@
 # MergeVideo
 
-將資料夾內多段數字序影片（`1.mp4`、`2.mp4`…）合併為一支 MP4。適用於 ComfyUI 數字人工作流等場景，可自動處理不同解析度、格式與音訊，並在合併前分析是否可使用快速 Copy 模式。
+將資料夾內多段數字序影片（`1.mp4`、`2.mp4`…）合併為一支 MP4，或從單支影片擷取第一幀 / 最後一幀 PNG。適用於 ComfyUI 數字人工作流等場景。
 
-## 功能
+## 工具
+
+| 指令 | 用途 |
+|------|------|
+| `mergevideo.py` | 合併多段數字序影片為一支 MP4 |
+| `VideoFirstFrame` | 擷取單支影片第一幀為 PNG |
+| `VideoLastFrame` | 擷取單支影片最後一幀為 PNG |
+
+## mergevideo 功能
 
 - 依檔名自然排序（`1 → 2 → 10`）
 - 自動分析解析度、幀率、編碼、音訊
 - 互動選擇 **Copy**（不重新編碼）或 **Encode**（統一規格後合併）
 - Encode 模式以**最大像素面積**片段為輸出解析度，較小段等比縮放並加黑邊
 - 每段保留音訊，無聲段自動補靜音
-- 預設輸出至 input 同層的 `output/mergedYYYYMMDDHHmmss.mp4`
+- 預設輸出至 input 資料夾內的 `output/mergedYYYYMMDDHHmmss.mp4`
 
 ## 環境需求
 
@@ -69,13 +77,12 @@ clips/
 
 ## 輸出規則
 
-未指定 `-o` 時，輸出至 input 資料夾**同層**的 `output/`：
+未指定 `-o` 時，輸出至 input 資料夾**裡面**的 `output/`：
 
 ```
-project/
-├── clips/          ← 輸入
-│   ├── 1.mp4
-│   └── 2.mp4
+clips/              ← 輸入
+├── 1.mp4
+├── 2.mp4
 └── output/         ← 自動建立
     └── merged20260619120930.mp4
 ```
@@ -141,18 +148,70 @@ Encode 模式: 可用
 ## ComfyUI 工作流
 
 1. ComfyUI 產出多段影片
-2. 重新命名為 `1.mp4`、`2.mp4`、`3.mp4` …
-3. 執行合併：
+2. （可選）擷取各段第一幀或最後一幀作為參考圖：
+
+```bash
+VideoFirstFrame ./clips/1.mp4
+# → ./clips/output/1_FirstFrame.png
+
+VideoLastFrame ./clips/1.mp4
+# → ./clips/output/1_LastFrame.png
+```
+
+3. 重新命名為 `1.mp4`、`2.mp4`、`3.mp4` …
+4. 執行合併：
 
 ```bash
 python3 mergevideo.py /path/to/comfyui/output --mode auto
+```
+
+## VideoFirstFrame
+
+擷取單支影片的第一幀，輸出 PNG。
+
+```bash
+VideoFirstFrame ./clips/1.mp4
+# → ./clips/output/1_FirstFrame.png
+```
+
+| 項目 | 說明 |
+|------|------|
+| 輸入 | 單一影片檔（不支援資料夾） |
+| 輸出檔名 | `{stem}_FirstFrame.png` |
+| 輸出位置 | 影片所在目錄下的 `output/` |
+| 格式 | PNG |
+
+## VideoLastFrame
+
+擷取單支影片的最後一幀，輸出 PNG。
+
+```bash
+VideoLastFrame ./clips/1.mp4
+# → ./clips/output/1_LastFrame.png
+```
+
+| 項目 | 說明 |
+|------|------|
+| 輸入 | 單一影片檔（不支援資料夾） |
+| 輸出檔名 | `{stem}_LastFrame.png` |
+| 輸出位置 | 影片所在目錄下的 `output/` |
+| 格式 | PNG |
+
+也可加上執行權限後直接呼叫：
+
+```bash
+chmod +x VideoLastFrame
+./VideoLastFrame ./clips/1.mp4
 ```
 
 ## 專案結構
 
 ```
 MergeVideo/
-├── mergevideo.py      # CLI 入口
+├── mergevideo.py      # 合併 CLI
+├── VideoFirstFrame    # 擷取第一幀 CLI
+├── VideoLastFrame     # 擷取最後一幀 CLI
+├── extract_frame.py   # 取幀邏輯
 ├── scanner.py         # 掃描與檔名驗證
 ├── probe.py           # ffprobe 解析
 ├── compat.py          # Copy 相容性判定
@@ -170,6 +229,8 @@ MergeVideo/
 | 至少需要 2 段影片 | 只有 1 個影片檔 |
 | Copy 模式不可用 | 片段規格不一致，改用 `--mode encode` |
 | 找不到 ffmpeg / ffprobe | 未安裝或未加入 PATH |
+| 請提供單一影片檔路徑 | VideoFirstFrame / VideoLastFrame 收到資料夾而非檔案 |
+| 找不到影片串流 | 輸入檔不含 video stream |
 
 ## License
 
