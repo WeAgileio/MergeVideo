@@ -21,3 +21,7 @@ def unauthorized_file(file_id: str) -> ApiError:
 
 def job_not_found(job_id: str) -> ApiError:
     return ApiError(404, "JOB_NOT_FOUND", f"找不到任務: {job_id}")
+
+
+def invalid_url(message: str) -> ApiError:
+    return ApiError(400, "INVALID_URL", message)

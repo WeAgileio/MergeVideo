@@ -249,7 +249,8 @@ docker compose up --build
 | `POST` | `/v1/jobs/merge` | 合併，`file_ids` 依**陣列順序**，內部自動選 copy/encode |
 | `POST` | `/v1/jobs/extract-first-frame` | 取第一幀 PNG |
 | `POST` | `/v1/jobs/extract-last-frame` | 取最後一幀 PNG |
-| `GET` | `/v1/jobs/{job_id}` | 查 job 狀態；含 `progress`（0–100），`done` 時回 `result.download_url` |
+| `POST` | `/v1/jobs/import-url` | 從 URL 匯入影片（非同步），done 回 `file_id` |
+| `GET` | `/v1/jobs/{job_id}` | 查 job 狀態；含 `progress`；merge/extract `done` 回 `download_url`，import `done` 回 `file_id` |
 | `GET` | `/health` | 健康檢查（含 ffmpeg 可用性） |
 
 所有 `/v1/*` 皆需 `Authorization: Bearer <api_key>`。
@@ -275,6 +276,21 @@ JOB=$(curl -s -X POST "$BASE/v1/jobs/merge" -H "Authorization: Bearer $KEY" \
 curl -s "$BASE/v1/jobs/$JOB" -H "Authorization: Bearer $KEY"
 # {"job_id": "j_...", "status": "processing", "progress": 45, ...}
 # {"job_id": "j_...", "status": "done", "progress": 100, "result": {"download_url": ...}}
+```
+
+### 從 URL 匯入（免自行上傳）
+
+```bash
+# 1. 建立 import job（server 代為下載，預設僅 https）
+IMPORT=$(curl -s -X POST "$BASE/v1/jobs/import-url" -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://cdn.example.com/clip.mp4"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['job_id'])")
+
+# 2. 輪詢直到 done，取得 file_id
+curl -s "$BASE/v1/jobs/$IMPORT" -H "Authorization: Bearer $KEY"
+# {"status": "done", "result": {"file_id": "f_...", ...}}
+
+# 3. 用 file_id 接 merge / extract（同上）
 ```
 
 ### 檔案儲存後端（啟動時切換）
@@ -303,7 +319,7 @@ STORAGE_BACKEND=rclone RCLONE_REMOTE=gdrive:mergevideo \
 
 ### 主要設定（環境變數）
 
-詳見 `.env.example`：`API_KEYS`、`STORAGE_BACKEND`、`REDIS_URL`、`MAX_FILE_SIZE_MB`（預設 200）、`FILE_TTL_HOURS`、`DOWNLOAD_URL_TTL_HOURS` 等。
+詳見 `.env.example`：`API_KEYS`、`STORAGE_BACKEND`、`REDIS_URL`、`MAX_FILE_SIZE_MB`（預設 200）、`FILE_TTL_HOURS`、`DOWNLOAD_URL_TTL_HOURS`、`IMPORT_URL_ALLOW_HTTP` 等。
 
 ### 測試
 

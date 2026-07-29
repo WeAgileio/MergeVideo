@@ -36,6 +36,7 @@ services:
       S3_SECRET_KEY: minioadmin
       PUBLIC_BASE_URL: http://localhost:8000
       API_KEYS: change-me
+      # URL import：預設只允許 https（IMPORT_URL_ALLOW_HTTP=true 可開 http）
     volumes:
       - api_data:/data
     depends_on:

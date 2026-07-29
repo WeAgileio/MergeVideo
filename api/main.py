@@ -24,11 +24,22 @@ _API_DESCRIPTION = """\
 
 ## 使用流程
 
+### 方式 A：上傳檔案
+
 1. **上傳影片** — `POST /v1/files`（multipart，欄位 `file`），取得 `file_id`
-2. **建立任務** — `POST /v1/jobs/merge`（合併，`file_ids` 依陣列順序）或
+
+### 方式 B：從 URL 匯入
+
+1. **建立匯入任務** — `POST /v1/jobs/import-url`（JSON 含 `url`），server 代為下載
+2. **輪詢狀態** — `GET /v1/jobs/{job_id}`，`done` 時 `result.file_id` 即為可用檔案 ID
+
+### 處理（兩種方式取得 `file_id` 後相同）
+
+1. **建立任務** — `POST /v1/jobs/merge`（合併，`file_ids` 依陣列順序）或
    `POST /v1/jobs/extract-first-frame` / `extract-last-frame`（取幀）
-3. **輪詢狀態** — `GET /v1/jobs/{job_id}`，狀態 `queued → processing → done / failed`
-4. **下載結果** — `done` 時回應內含 `result.download_url`（presigned URL，有過期時間）
+2. **輪詢狀態** — `GET /v1/jobs/{job_id}`，狀態 `queued → processing → done / failed`
+3. **取得結果** — merge/extract 的 `done` 含 `result.download_url`（presigned URL）；
+   import-url 的 `done` 含 `result.file_id`（供後續任務引用）
 
 ## 認證
 
@@ -44,6 +55,9 @@ _API_DESCRIPTION = """\
 | code | 說明 |
 |------|------|
 | `UNAUTHORIZED` | 缺少或無效的 API key |
+| `INVALID_URL` | URL 格式或 scheme 不允許（預設僅 https） |
+| `URL_NOT_ALLOWED` | URL 指向內網或禁止位址（SSRF 防護） |
+| `DOWNLOAD_FAILED` | URL 下載失敗或逾時 |
 | `FILE_NOT_FOUND` | file_id 不存在、已過期或非本人所有 |
 | `UNAUTHORIZED_FILE` | 以他人檔案建立任務 |
 | `FILE_TOO_LARGE` | 超過單檔大小上限（預設 200 MB） |
@@ -56,7 +70,7 @@ _API_DESCRIPTION = """\
 
 _TAGS_METADATA = [
     {"name": "files", "description": "影片上傳與管理：上傳後取得 `file_id`，同一檔案可重複用於多個任務。檔案有 TTL（預設 24h），被進行中任務引用時不會過期。"},
-    {"name": "jobs", "description": "非同步處理任務：合併（copy/encode 自動判斷）與取幀。建立後輪詢 `GET /v1/jobs/{job_id}` 取得結果。"},
+    {"name": "jobs", "description": "非同步處理任務：合併（copy/encode 自動判斷）、取幀、**從 URL 匯入影片**。建立後輪詢 `GET /v1/jobs/{job_id}`；merge/extract 完成取得 download URL，import-url 完成取得 `file_id`。"},
     {"name": "system", "description": "健康檢查等系統端點。"},
 ]
 

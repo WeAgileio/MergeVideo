@@ -1,4 +1,4 @@
-"""非同步 job endpoints（merge / extract frame）。"""
+"""非同步 job endpoints（merge / extract frame / import url）。"""
 
 from __future__ import annotations
 
@@ -13,17 +13,19 @@ from sqlalchemy.orm import Session
 from api.auth import require_api_key
 from api.config import get_settings
 from api.db import get_session
-from api.errors import ApiError, job_not_found, unauthorized_file
+from api.errors import ApiError, invalid_url, job_not_found, unauthorized_file
 from api.models import FileRecord, JobRecord, JobStatus, utcnow
 from api.routes.files import get_owned_file
 from api.services.queue import get_queue
 from api.services.storage import get_storage
+from api.services.url_import import UrlImportError, validate_url_scheme
 
 router = APIRouter(prefix="/v1/jobs", tags=["jobs"])
 
 JOB_TYPE_MERGE = "merge"
 JOB_TYPE_FIRST_FRAME = "extract_first_frame"
 JOB_TYPE_LAST_FRAME = "extract_last_frame"
+JOB_TYPE_IMPORT_URL = "import_url"
 
 
 class MergeRequest(BaseModel):
@@ -39,6 +41,18 @@ class MergeRequest(BaseModel):
 
 class ExtractRequest(BaseModel):
     file_id: str = Field(description="來源影片的 file_id", examples=["f_aaa111"])
+
+
+class ImportUrlRequest(BaseModel):
+    url: str = Field(
+        description="可公開 GET 的影片 URL（預設僅 https）",
+        examples=["https://cdn.example.com/clips/1.mp4"],
+    )
+    filename: str | None = Field(
+        default=None,
+        description="可選；省略則從 URL path 推斷",
+        examples=["1.mp4"],
+    )
 
 
 _JOB_ACCEPTED_RESPONSE = {
@@ -57,6 +71,35 @@ _JOB_ACCEPTED_RESPONSE = {
     },
     403: {"description": "引用了他人的檔案（UNAUTHORIZED_FILE）"},
     404: {"description": "檔案不存在或已過期（FILE_NOT_FOUND）"},
+}
+
+_IMPORT_URL_ACCEPTED_RESPONSE = {
+    202: {
+        "description": "匯入任務已排入佇列",
+        "content": {
+            "application/json": {
+                "example": {
+                    "job_id": "j_import123abc",
+                    "type": "import_url",
+                    "status": "queued",
+                    "status_url": "/v1/jobs/j_import123abc",
+                }
+            }
+        },
+    },
+    400: {
+        "description": "URL 無效（INVALID_URL）",
+        "content": {
+            "application/json": {
+                "example": {
+                    "error": {
+                        "code": "INVALID_URL",
+                        "message": "僅允許 https URL（或設定 IMPORT_URL_ALLOW_HTTP=true）",
+                    }
+                }
+            }
+        },
+    },
 }
 
 
@@ -104,6 +147,31 @@ def _create_job(
     return {
         "job_id": job.job_id,
         "type": job_type,
+        "status": JobStatus.QUEUED,
+        "status_url": f"/v1/jobs/{job.job_id}",
+    }
+
+
+def _create_import_url_job(
+    session: Session,
+    *,
+    owner_key: str,
+    url: str,
+    filename: str | None,
+) -> dict:
+    job = JobRecord(
+        job_id=f"j_{uuid.uuid4().hex[:12]}",
+        owner_key=owner_key,
+        type=JOB_TYPE_IMPORT_URL,
+        status=JobStatus.QUEUED,
+        input_json=json.dumps({"url": url, "filename": filename}),
+    )
+    session.add(job)
+    session.commit()
+    get_queue().enqueue(job.job_id)
+    return {
+        "job_id": job.job_id,
+        "type": JOB_TYPE_IMPORT_URL,
         "status": JobStatus.QUEUED,
         "status_url": f"/v1/jobs/{job.job_id}",
     }
@@ -186,15 +254,46 @@ def create_extract_last_frame_job(
     )
 
 
+@router.post(
+    "/import-url",
+    status_code=202,
+    summary="從 URL 匯入影片",
+    description=(
+        "由 server 下載指定 URL 的影片並註冊為 `file_id`（非同步 job）。\n\n"
+        "- 預設僅允許 `https://`；`IMPORT_URL_ALLOW_HTTP=true` 可開放 `http://`\n"
+        "- 完成後 `result` 含 `file_id`（非 download_url），可接 merge / extract job\n"
+        "- 大小上限與 upload 相同（`MAX_FILE_SIZE_MB`）\n"
+        "- 失敗時常見 error code：`URL_NOT_ALLOWED`、`DOWNLOAD_FAILED`、"
+        "`FILE_TOO_LARGE`、`UNSUPPORTED_FORMAT`"
+    ),
+    responses=_IMPORT_URL_ACCEPTED_RESPONSE,
+)
+def create_import_url_job(
+    body: ImportUrlRequest,
+    owner_key: str = Depends(require_api_key),
+    session: Session = Depends(get_session),
+) -> dict:
+    settings = get_settings()
+    try:
+        validate_url_scheme(body.url, allow_http=settings.import_url_allow_http)
+    except UrlImportError as exc:
+        raise invalid_url(exc.message) from exc
+    return _create_import_url_job(
+        session,
+        owner_key=owner_key,
+        url=body.url.strip(),
+        filename=body.filename,
+    )
+
+
 @router.get(
     "/{job_id}",
     summary="查詢任務狀態",
     description=(
         "輪詢任務狀態。狀態流轉：`queued → processing → done / failed`。\n\n"
-        "- `progress`：處理進度 0–100（依 FFmpeg 已處理時長估算；"
+        "- `progress`：處理進度 0–100（merge 依 FFmpeg 時長；import-url 依下載 bytes；"
         "取幀任務極快，可能直接從 0 跳到 100）\n"
-        "- `done`：回應含 `result.download_url`（presigned URL，每次查詢重新產生，"
-        "有效期由 `DOWNLOAD_URL_TTL_HOURS` 控制）\n"
+        "- `done`：merge/extract 含 `result.download_url`；import-url 含 `result.file_id`\n"
         "- `failed`：回應含 `error.code` 與 `error.message`"
     ),
     responses={
@@ -231,6 +330,52 @@ def create_extract_last_frame_job(
                                     "filename": "merged.mp4",
                                     "content_type": "video/mp4",
                                     "size_bytes": 156789012,
+                                },
+                            },
+                        },
+                        "import_processing": {
+                            "summary": "URL 匯入中",
+                            "value": {
+                                "job_id": "j_import123abc",
+                                "type": "import_url",
+                                "status": "processing",
+                                "progress": 45,
+                                "created_at": "2026-07-29T02:00:00Z",
+                                "started_at": "2026-07-29T02:00:01Z",
+                                "completed_at": None,
+                            },
+                        },
+                        "import_done": {
+                            "summary": "URL 匯入完成",
+                            "value": {
+                                "job_id": "j_import123abc",
+                                "type": "import_url",
+                                "status": "done",
+                                "progress": 100,
+                                "created_at": "2026-07-29T02:00:00Z",
+                                "started_at": "2026-07-29T02:00:01Z",
+                                "completed_at": "2026-07-29T02:00:45Z",
+                                "result": {
+                                    "file_id": "f_imported456",
+                                    "filename": "clip.mp4",
+                                    "size_bytes": 52428800,
+                                    "expires_at": "2026-07-30T02:00:45Z",
+                                },
+                            },
+                        },
+                        "import_failed": {
+                            "summary": "URL 匯入失敗",
+                            "value": {
+                                "job_id": "j_import123abc",
+                                "type": "import_url",
+                                "status": "failed",
+                                "progress": 0,
+                                "created_at": "2026-07-29T02:00:00Z",
+                                "started_at": "2026-07-29T02:00:01Z",
+                                "completed_at": "2026-07-29T02:00:05Z",
+                                "error": {
+                                    "code": "URL_NOT_ALLOWED",
+                                    "message": "URL 指向不允許的位址: 10.0.0.1",
                                 },
                             },
                         },
@@ -290,6 +435,15 @@ def _build_result(job: JobRecord) -> dict | None:
     if not job.result_json:
         return None  # 結果已過 TTL 被清理
     result = json.loads(job.result_json)
+
+    if job.type == JOB_TYPE_IMPORT_URL:
+        return {
+            "file_id": result["file_id"],
+            "filename": result["filename"],
+            "size_bytes": result["size_bytes"],
+            "expires_at": result["expires_at"],
+        }
+
     settings = get_settings()
     ttl_seconds = settings.download_url_ttl_hours * 3600
     download_url = get_storage().presigned_url(

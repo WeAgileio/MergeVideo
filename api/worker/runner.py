@@ -10,17 +10,27 @@ import json
 import tempfile
 import time
 import traceback
+import uuid
+from datetime import timedelta
 from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 import api  # noqa: F401  # 確保 repo 根目錄在 sys.path，才能 import 核心模組
+from api.config import get_settings
 from api.db import init_db, session_scope
 from api.models import FileRecord, JobRecord, JobStatus, utcnow
+from api.routes.files import _probe_metadata
 from api.services.cleanup import cleanup_expired
 from api.services.queue import get_queue
 from api.services.storage import Storage, get_storage
+from api.services.url_import import (
+    UrlImportError,
+    download_url_to_file,
+    infer_filename,
+    validate_video_file,
+)
 from extract_frame import extract_first_frame, extract_last_frame
 from merger import merge_auto
 
@@ -125,6 +135,59 @@ def _run_extract(
     }
 
 
+def _run_import_url(job: JobRecord, session: Session, storage: Storage, tmp: Path) -> dict:
+    settings = get_settings()
+    payload = json.loads(job.input_json)
+    url: str = payload["url"]
+    filename = infer_filename(url, payload.get("filename"))
+    suffix = Path(filename).suffix.lower() or ".mp4"
+    dest = tmp / f"download{suffix}"
+
+    updater = _make_progress_updater(job, session)
+
+    def on_download_progress(fraction: float) -> None:
+        updater(min(fraction * 0.9, 0.9))
+
+    download_url_to_file(
+        url,
+        dest,
+        allow_http=settings.import_url_allow_http,
+        max_bytes=settings.max_file_size_bytes,
+        connect_timeout=settings.import_url_connect_timeout_sec,
+        total_timeout=settings.import_url_total_timeout_sec,
+        max_redirects=settings.import_url_max_redirects,
+        on_progress=on_download_progress,
+    )
+    validate_video_file(dest, filename)
+
+    file_id = f"f_{uuid.uuid4().hex[:12]}"
+    storage_key = f"uploads/{file_id}/original{suffix}"
+    storage.put(storage_key, dest, "video/mp4")
+
+    now = utcnow()
+    expires_at = now + timedelta(hours=settings.file_ttl_hours)
+    record = FileRecord(
+        file_id=file_id,
+        owner_key=job.owner_key,
+        filename=filename,
+        storage_key=storage_key,
+        size_bytes=dest.stat().st_size,
+        content_type="video/mp4",
+        metadata_json=_probe_metadata(dest),
+        created_at=now,
+        expires_at=expires_at,
+    )
+    session.add(record)
+    session.flush()
+
+    return {
+        "file_id": file_id,
+        "filename": filename,
+        "size_bytes": record.size_bytes,
+        "expires_at": expires_at.isoformat(timespec="seconds") + "Z",
+    }
+
+
 def _unpin_files(session: Session, job: JobRecord) -> None:
     payload = json.loads(job.input_json)
     for file_id in set(payload.get("file_ids", [])):
@@ -143,12 +206,18 @@ def process_job(job: JobRecord, session: Session, storage: Storage) -> None:
                 result = _run_extract(job, session, storage, tmp, last=False)
             elif job.type == "extract_last_frame":
                 result = _run_extract(job, session, storage, tmp, last=True)
+            elif job.type == "import_url":
+                result = _run_import_url(job, session, storage, tmp)
             else:
                 raise RuntimeError(f"未知的任務類型: {job.type}")
 
         job.status = JobStatus.DONE
         job.progress = 100
         job.result_json = json.dumps(result)
+    except UrlImportError as exc:
+        job.status = JobStatus.FAILED
+        job.error_code = exc.code
+        job.error_message = exc.message
     except Exception as exc:
         traceback.print_exc()
         job.status = JobStatus.FAILED

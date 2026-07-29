@@ -38,6 +38,10 @@ class Settings:
     result_ttl_hours: int
     download_url_ttl_hours: int
     cors_origins: tuple[str, ...]
+    import_url_allow_http: bool
+    import_url_connect_timeout_sec: float
+    import_url_total_timeout_sec: float
+    import_url_max_redirects: int
 
 
 @lru_cache(maxsize=1)
@@ -67,6 +71,11 @@ def get_settings() -> Settings:
         result_ttl_hours=int(os.getenv("RESULT_TTL_HOURS", "72")),
         download_url_ttl_hours=int(os.getenv("DOWNLOAD_URL_TTL_HOURS", "24")),
         cors_origins=_split_csv(os.getenv("CORS_ORIGINS", "*")) or ("*",),
+        import_url_allow_http=os.getenv("IMPORT_URL_ALLOW_HTTP", "false").lower()
+        in ("1", "true", "yes"),
+        import_url_connect_timeout_sec=float(os.getenv("IMPORT_URL_CONNECT_TIMEOUT_SEC", "10")),
+        import_url_total_timeout_sec=float(os.getenv("IMPORT_URL_TOTAL_TIMEOUT_SEC", "600")),
+        import_url_max_redirects=int(os.getenv("IMPORT_URL_MAX_REDIRECTS", "3")),
     )
 
 

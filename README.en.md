@@ -249,7 +249,8 @@ Once the service is running:
 | `POST` | `/v1/jobs/merge` | Merge videos; order follows **`file_ids` array order**; auto copy/encode internally |
 | `POST` | `/v1/jobs/extract-first-frame` | Extract first frame as PNG |
 | `POST` | `/v1/jobs/extract-last-frame` | Extract last frame as PNG |
-| `GET` | `/v1/jobs/{job_id}` | Get job status; includes `progress` (0–100); returns `result.download_url` when `done` |
+| `POST` | `/v1/jobs/import-url` | Import video from URL (async); returns `file_id` when done |
+| `GET` | `/v1/jobs/{job_id}` | Get job status; includes `progress`; merge/extract `done` returns `download_url`, import `done` returns `file_id` |
 | `GET` | `/health` | Health check (includes ffmpeg availability) |
 
 All `/v1/*` endpoints require `Authorization: Bearer <api_key>`.
@@ -275,6 +276,20 @@ JOB=$(curl -s -X POST "$BASE/v1/jobs/merge" -H "Authorization: Bearer $KEY" \
 curl -s "$BASE/v1/jobs/$JOB" -H "Authorization: Bearer $KEY"
 # {"job_id": "j_...", "status": "processing", "progress": 45, ...}
 # {"job_id": "j_...", "status": "done", "progress": 100, "result": {"download_url": ...}}
+```
+
+### Import from URL (skip manual upload)
+
+```bash
+# 1. Create import job (server downloads; HTTPS only by default)
+IMPORT=$(curl -s -X POST "$BASE/v1/jobs/import-url" -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://cdn.example.com/clip.mp4"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['job_id'])")
+
+# 2. Poll until done; get file_id
+curl -s "$BASE/v1/jobs/$IMPORT" -H "Authorization: Bearer $KEY"
+
+# 3. Use file_id in merge / extract jobs (same as above)
 ```
 
 ### Storage Backends (switch at startup)
@@ -303,7 +318,7 @@ Note: `gcs` / `azure` need extra packages (see comments in `requirements-api.txt
 
 ### Key Settings (Environment Variables)
 
-See `.env.example`: `API_KEYS`, `STORAGE_BACKEND`, `REDIS_URL`, `MAX_FILE_SIZE_MB` (default 200), `FILE_TTL_HOURS`, `DOWNLOAD_URL_TTL_HOURS`, etc.
+See `.env.example`: `API_KEYS`, `STORAGE_BACKEND`, `REDIS_URL`, `MAX_FILE_SIZE_MB` (default 200), `FILE_TTL_HOURS`, `DOWNLOAD_URL_TTL_HOURS`, `IMPORT_URL_ALLOW_HTTP`, etc.
 
 ### Tests
 
