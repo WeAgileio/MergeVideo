@@ -1,5 +1,7 @@
 # MergeVideo
 
+[English README](README.en.md)
+
 將資料夾內多段數字序影片（`1.mp4`、`2.mp4`…）合併為一支 MP4，或從單支影片擷取第一幀 / 最後一幀 PNG。適用於 ComfyUI 數字人工作流等場景。
 
 ## 工具
