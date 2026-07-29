@@ -1,5 +1,5 @@
 ---
-description: 相關規定
+description: Git commit/push/tag 前須確認；Conventional Commits 與發版流程
 globs:
   - "**/*"
 alwaysApply: true
@@ -8,15 +8,17 @@ alwaysApply: true
 
 ## Git 提交流程規則
 
-在這個專案中，**只要需要你協助執行任何會影響遠端狀態的 git 操作（包含 `commit`、`tag`、以及 `push`/`push --tags` 推送）時，操作順序必須嚴格遵守：**
+在這個專案中，**只要需要你協助執行任何會影響遠端狀態的 git 操作（包含 `commit`、`tag`、以及 `push`/`push --tags` 推送）時**，操作順序為：
 
-1. `git pull`：先從遠端拉取最新變更，處理衝突後再繼續。
-2. `git commit`：使用符合本檔案規則的 Commits 規範建立提交。
-3. `git push`：最後才把本地提交推送到遠端。
+1. `git commit`：使用符合本檔案 Commits 規範建立提交（僅在使用者明確要求，或變更已就緒且使用者同意提交時）。
+2. **推送前同步**：以 `git status` / `git fetch` 確認與遠端分支狀態；若本地落後遠端，先 `git pull --rebase`（或 merge）並處理衝突。
+3. `git push` / `git push --tags`：確認已與遠端同步後，才把本地提交推送到遠端。
 
-- 若使用者已經手動完成其中部分步驟（例如先自己 pull），你可以跳過已完成的步驟，  
- 但 **絕對不得在未 pull 的情況下直接進行 `commit → push` 或 `tag → push tag`**。
-- 在實際執行任何 git 指令前，**必須先用自然語言向使用者說明你打算執行的步驟與指令，並等待使用者確認後再執行**。
+- 若 `git status` 已顯示與遠端同步（例如 `Your branch is up to date with 'origin/main'`），**不必在每次 commit 前先 pull**。
+- 若使用者已手動完成部分步驟（例如已自行 pull 或 commit），可跳過已完成步驟；但 **push 前仍須確認遠端狀態**。
+- **確認時機**：
+  - 使用者**已明確要求**（例如「幫我提交並 push」）→ 可直接執行；執行前可簡短說明將做的步驟。
+  - **僅在你主動建議**提交/推送，或範圍不清（要 commit 哪些檔、訊息怎麼寫、是否 force push 等）→ 先說明計畫並等待使用者確認後再執行。
 
 ---
 
@@ -70,10 +72,10 @@ docs(readme): 更新安裝步驟
 
 ### 4. Description（描述）
 
-- 預設使用 **英文小寫**（除非團隊規範改為中文）
+- 使用 **中文** 撰寫 description
 - 描述需 **簡潔且具體**
 - **不要加句號結尾**
-- 使用 **祈使句（imperative）**
+- 使用 **祈使句**（如「新增…」「修正…」「更新…」），避免過去式（如「新增了…」）
 
 建議寫法：
 
@@ -166,26 +168,28 @@ BREAKING CHANGE: 客戶端須從 /v1/token 遷移至 /v2/token
 新增了登入功能（用了過去式，且無 type）
 修 bug（描述過於籠統）
 更新一些東西（語意不清）
-feat: 新增了新功能（description 勿用大寫開頭、勿用過去式）
+feat: 新增了新功能（描述空泛，且用了過去式）
 ```
 
 ---
 
 ## Release 規則
 
-當你要協助建立新版本（例如：打 tag、建立 GitHub Release、或在討論中明確提到「release / 發版 / 上線」）時，必須同時確保：
+當你要協助建立新版本（例如：打 tag、建立 GitHub Release、或在討論中明確提到「release / 發版 / 上線」）時，須確保：
 
 - `README.md` 中有對應這次版本的 **Release Notes** 區塊或條目，內容至少包含：
   - 本次版本的簡短說明（例如：新增了哪些主要功能或修正了哪些問題）
   - 若有破壞性修改，需在這裡特別標註
-  - 不要描述技術性的調整，只需要描述功能性的
+  - 以**使用者可感知**的功能變更為主；不必寫內部重構或程式碼調整
+  - **API、部署、設定**等對使用者或整合方有影響的變更也要寫（例如新增 endpoint、環境變數變更）
 - 若 `README.md` 尚未有 Release 區塊，先幫使用者在 README 底部加上一個簡單的「Release Notes」章節，然後再加入這次版本的說明。
 - 在建立/推送 tag 及建立 GitHub Release 前，先確認（或補齊）上述 `README.md` 的 Release Notes
 - 在幫忙產生 release 描述或 changelog 時，**優先復用或同步到 `README.md` 的 Release Notes**，避免兩邊內容不一致。
-- 使用者只要明確說「發版」（即使沒特別拆開講），預設視為要同時完成 **Git 發版 + GitHub Release**，不可只做其中一邊。
+- 使用者明確說「發版」（即使沒特別拆開講），**預設**同時完成 **Git 發版 + GitHub Release**。
+- 若使用者明確表示**只要打 tag、不要 GitHub Release**（或類似表述），可略過 `gh release create`，其餘步驟仍須完成。
 - 預設執行順序：
   1. 整理版本內容（必要時更新 `README.md` 版本紀錄／`package.json` 版本號）。
-  2. Git 發版：`git pull` → `commit` → 建立並推送 **annotated tag**（例如 `v1.2.0`，與 `package.json` 一致）→ `push` / `push --tags`。
-  3. **GitHub Release**：在標籤已於遠端存在後，使用 **`gh release create <tag>`** 建立 Release（標題可用版本號；內文優先自 `README.md` 該版條目整理，與 README 一致）。若本機無 `gh` 或未登入，須向使用者說明並改請其於網頁建立，或協助安裝／登入後再執行；**不可略過此步**（除非使用者當下明確表示不要 GitHub Release）。
-- 若任一步驟缺少必要資訊（例如版本號、tag 命名規則），先向使用者確認；若資訊齊全則直接完整執行到 **git、GitHub Release** 發布完成。
+  2. Git 發版：`commit`（含 README 等版本內容）→ 推送前以 `git status` / `git fetch` 確認遠端狀態，必要時 `git pull --rebase`（或 merge）→ 建立 **annotated tag**（`git tag -a vX.Y.Z -m "vX.Y.Z"`，例如 `v1.2.0`，與 `package.json` 一致；**勿用 lightweight tag**）→ `push` / `push --tags`。
+  3. **GitHub Release**（預設執行）：在標籤已於遠端存在後，使用 **`gh release create <tag>`** 建立 Release（標題可用版本號；內文優先自 `README.md` 該版條目整理，與 README 一致）。若本機無 `gh` 或未登入，須向使用者說明並改請其於網頁建立，或協助安裝／登入後再執行。
+- 若任一步驟缺少必要資訊（例如版本號、tag 命名規則），先向使用者確認；若資訊齊全則直接完整執行（預設含 GitHub Release；使用者只要 tag 時則至 tag 推送完成即可）。
 
