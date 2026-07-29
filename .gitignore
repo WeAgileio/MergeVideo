@@ -1,2 +1,7 @@
 test_data/test/
 test_data/**/output/
+api_data/
+.env
+.venv/
+__pycache__/
+.pytest_cache/

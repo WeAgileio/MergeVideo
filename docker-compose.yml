@@ -1,0 +1,57 @@
+# 資料夾名稱為中文，Compose 無法自動推導 project name，必須明確指定
+name: mergevideo
+
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  api:
+    build: .
+    command: uvicorn api.main:create_app --factory --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment: &app_env
+      DATABASE_URL: sqlite:////data/api.db
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_BACKEND: s3
+      S3_ENDPOINT_URL: http://minio:9000
+      # presigned URL 簽名用的對外端點（瀏覽器可達）
+      S3_PUBLIC_ENDPOINT_URL: http://localhost:9000
+      S3_BUCKET: mergevideo
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      PUBLIC_BASE_URL: http://localhost:8000
+      API_KEYS: change-me
+    volumes:
+      - api_data:/data
+    depends_on:
+      - minio
+      - redis
+
+  worker:
+    build: .
+    command: python -m api.worker
+    environment: *app_env
+    volumes:
+      - api_data:/data
+    depends_on:
+      - minio
+      - redis
+
+volumes:
+  minio_data:
+  api_data:

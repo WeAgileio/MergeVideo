@@ -5,9 +5,27 @@ from __future__ import annotations
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
-from ffmpeg_utils import run_command
-from probe import VideoInfo
+from compat import check_copy_compat
+from ffmpeg_utils import run_command, run_ffmpeg_with_progress
+from probe import VideoInfo, pick_output_size, probe_all
+
+ProgressCallback = Callable[[float], None]
+
+
+def _run_merge_command(
+    args: list[str],
+    videos: list[VideoInfo],
+    progress_callback: ProgressCallback | None,
+) -> None:
+    total_duration = sum(video.duration for video in videos)
+    if progress_callback is not None and total_duration > 0:
+        run_ffmpeg_with_progress(
+            args, total_duration=total_duration, on_progress=progress_callback
+        )
+    else:
+        run_command(args)
 
 
 def default_output_path(input_folder: Path) -> Path:
@@ -28,14 +46,19 @@ def _escape_concat_path(path: Path) -> str:
     return str(path.resolve()).replace("'", "'\\''")
 
 
-def merge_copy(videos: list[VideoInfo], output_path: Path) -> None:
+def merge_copy(
+    videos: list[VideoInfo],
+    output_path: Path,
+    *,
+    progress_callback: ProgressCallback | None = None,
+) -> None:
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as handle:
         list_path = Path(handle.name)
         for video in videos:
             handle.write(f"file '{_escape_concat_path(video.path)}'\n")
 
     try:
-        run_command(
+        _run_merge_command(
             [
                 "ffmpeg",
                 "-y",
@@ -48,10 +71,44 @@ def merge_copy(videos: list[VideoInfo], output_path: Path) -> None:
                 "-c",
                 "copy",
                 str(output_path),
-            ]
+            ],
+            videos,
+            progress_callback,
         )
     finally:
         list_path.unlink(missing_ok=True)
+
+
+def merge_auto(
+    paths: list[Path],
+    output_path: Path,
+    *,
+    crf: int = 18,
+    progress_callback: ProgressCallback | None = None,
+) -> str:
+    """依給定順序合併影片（mode=auto）。
+
+    接受有序 path list（不要求數字檔名），相容則 copy，否則 encode。
+    progress_callback 會收到 0.0–1.0 的處理進度。
+    回傳實際使用的模式（"copy" / "encode"）。
+    """
+    videos = probe_all(paths)
+    compat = check_copy_compat(videos)
+    if compat.copy_ok:
+        merge_copy(videos, output_path, progress_callback=progress_callback)
+        return "copy"
+
+    width, height, reference = pick_output_size(videos)
+    merge_encode(
+        videos,
+        output_path,
+        width=width,
+        height=height,
+        fps=reference.fps_float,
+        crf=crf,
+        progress_callback=progress_callback,
+    )
+    return "encode"
 
 
 def merge_encode(
@@ -62,6 +119,7 @@ def merge_encode(
     height: int,
     fps: float,
     crf: int,
+    progress_callback: ProgressCallback | None = None,
 ) -> None:
     inputs: list[str] = []
     for video in videos:
@@ -97,7 +155,7 @@ def merge_encode(
         + f"concat=n={count}:v=1:a=1[outv][outa]"
     )
 
-    run_command(
+    _run_merge_command(
         [
             "ffmpeg",
             "-y",
@@ -117,5 +175,7 @@ def merge_encode(
             "-b:a",
             "192k",
             str(output_path),
-        ]
+        ],
+        videos,
+        progress_callback,
     )

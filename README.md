@@ -204,6 +204,112 @@ chmod +x VideoLastFrame
 ./VideoLastFrame ./clips/1.mp4
 ```
 
+## HTTP API
+
+除 CLI 外，另提供 REST API（FastAPI），供雲端 Web 服務呼叫。流程：**上傳檔案取得 `file_id` → 建立非同步 job → 輪詢 job 狀態 → 以 download URL 下載結果**。
+
+### 啟動（本機開發）
+
+```bash
+pip install -r requirements-api.txt
+cp .env.example .env   # 修改 API_KEYS 等設定
+
+# API server
+uvicorn api.main:create_app --factory --reload
+
+# Worker（另開終端）
+python -m api.worker
+```
+
+或使用 Docker Compose（含 MinIO + Redis）：
+
+```bash
+docker compose up --build
+```
+
+### 互動式 API 文檔（Swagger）
+
+服務啟動後即可使用：
+
+| 位址 | 說明 |
+|------|------|
+| `http://localhost:8000/docs` | Swagger UI — 可點右上角 **Authorize** 填入 API key，直接在頁面上傳檔案、建任務、輪詢結果 |
+| `http://localhost:8000/redoc` | ReDoc — 適合閱讀的文檔版面 |
+| `http://localhost:8000/openapi.json` | OpenAPI 3.1 spec — 可匯入 Postman / Insomnia 或產生 client SDK |
+
+### Endpoints
+
+| Method | Path | 用途 |
+|--------|------|------|
+| `POST` | `/v1/files` | 上傳影片（multipart，欄位 `file`），回 `file_id` |
+| `GET` | `/v1/files/{file_id}` | 查檔案 metadata |
+| `DELETE` | `/v1/files/{file_id}` | 刪除檔案 |
+| `POST` | `/v1/jobs/merge` | 合併，`file_ids` 依**陣列順序**，內部自動選 copy/encode |
+| `POST` | `/v1/jobs/extract-first-frame` | 取第一幀 PNG |
+| `POST` | `/v1/jobs/extract-last-frame` | 取最後一幀 PNG |
+| `GET` | `/v1/jobs/{job_id}` | 查 job 狀態；含 `progress`（0–100），`done` 時回 `result.download_url` |
+| `GET` | `/health` | 健康檢查（含 ffmpeg 可用性） |
+
+所有 `/v1/*` 皆需 `Authorization: Bearer <api_key>`。
+
+### 使用範例
+
+```bash
+KEY="change-me"
+BASE="http://localhost:8000"
+
+# 1. 上傳兩段影片
+F1=$(curl -s -X POST "$BASE/v1/files" -H "Authorization: Bearer $KEY" \
+  -F "file=@1.mp4" | python3 -c "import sys,json;print(json.load(sys.stdin)['file_id'])")
+F2=$(curl -s -X POST "$BASE/v1/files" -H "Authorization: Bearer $KEY" \
+  -F "file=@2.mp4" | python3 -c "import sys,json;print(json.load(sys.stdin)['file_id'])")
+
+# 2. 建立合併 job（依陣列順序）
+JOB=$(curl -s -X POST "$BASE/v1/jobs/merge" -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"file_ids\": [\"$F1\", \"$F2\"]}" | python3 -c "import sys,json;print(json.load(sys.stdin)['job_id'])")
+
+# 3. 輪詢直到 done，取得 download_url（processing 時可用 progress 顯示進度條）
+curl -s "$BASE/v1/jobs/$JOB" -H "Authorization: Bearer $KEY"
+# {"job_id": "j_...", "status": "processing", "progress": 45, ...}
+# {"job_id": "j_...", "status": "done", "progress": 100, "result": {"download_url": ...}}
+```
+
+### 檔案儲存後端（啟動時切換）
+
+以環境變數 `STORAGE_BACKEND` 切換，所有後端共用同一介面，上傳 / 處理 / 下載邏輯不變：
+
+| backend | 適用 | 必要設定 | download URL |
+|---------|------|----------|--------------|
+| `local` | 本機開發 | `LOCAL_STORAGE_DIR` | API `/storage` 路由 |
+| `s3` | AWS S3 及所有 S3 相容（MinIO / Cloudflare R2 / 阿里 OSS / 腾讯 COS / Wasabi / B2） | `S3_BUCKET`、`S3_ACCESS_KEY`、`S3_SECRET_KEY`，非 AWS 需 `S3_ENDPOINT_URL` | presigned URL |
+| `gcs` | Google Cloud Storage | `GCS_BUCKET`、`GCS_CREDENTIALS_JSON`（service account） | v4 signed URL |
+| `azure` | Azure Blob Storage | `AZURE_CONNECTION_STRING`、`AZURE_CONTAINER` | SAS URL |
+| `rclone` | **Google Drive、OneDrive**、Dropbox、Box 等 rclone 支援的遠端 | 先 `rclone config` 建遠端，再設 `RCLONE_REMOTE`（如 `gdrive:mergevideo`） | `rclone link` 分享連結 |
+
+```bash
+# 例：切到 AWS S3
+STORAGE_BACKEND=s3 S3_BUCKET=my-bucket S3_ACCESS_KEY=... S3_SECRET_KEY=... \
+  uvicorn api.main:create_app --factory
+
+# 例：切到 Google Drive（需先 rclone config 建立名為 gdrive 的遠端）
+STORAGE_BACKEND=rclone RCLONE_REMOTE=gdrive:mergevideo \
+  uvicorn api.main:create_app --factory
+```
+
+注意：`gcs` / `azure` 需另安裝對應套件（見 `requirements-api.txt` 註解）；rclone 分享連結無過期時間控制，適合內部流程、不適合需要嚴格權限的場景。
+
+### 主要設定（環境變數）
+
+詳見 `.env.example`：`API_KEYS`、`STORAGE_BACKEND`、`REDIS_URL`、`MAX_FILE_SIZE_MB`（預設 200）、`FILE_TTL_HOURS`、`DOWNLOAD_URL_TTL_HOURS` 等。
+
+### 測試
+
+```bash
+pip install -r requirements-api.txt
+python -m pytest tests/
+```
+
 ## 專案結構
 
 ```
@@ -216,8 +322,15 @@ MergeVideo/
 ├── probe.py           # ffprobe 解析
 ├── compat.py          # Copy 相容性判定
 ├── report.py          # 分析報告
-├── merger.py          # 合併引擎
-└── ffmpeg_utils.py    # FFmpeg 工具封裝
+├── merger.py          # 合併引擎（含 merge_auto 供 API 使用）
+├── ffmpeg_utils.py    # FFmpeg 工具封裝
+├── api/               # HTTP API（FastAPI）
+│   ├── main.py        #   app 入口（factory）
+│   ├── routes/        #   files / jobs endpoints
+│   ├── models/        #   file registry 與 job store
+│   ├── services/      #   storage / queue / cleanup
+│   └── worker/        #   背景處理 worker
+└── tests/             # API 整合測試
 ```
 
 ## 常見錯誤

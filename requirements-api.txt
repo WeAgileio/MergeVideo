@@ -1,0 +1,15 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+sqlalchemy>=2.0
+boto3>=1.34
+redis>=5.0
+
+# 可選：依 STORAGE_BACKEND 選擇安裝
+# google-cloud-storage>=2.16   # STORAGE_BACKEND=gcs
+# azure-storage-blob>=12.20    # STORAGE_BACKEND=azure
+# rclone 後端需另安裝 rclone CLI（brew install rclone）
+
+# 測試
+pytest>=8.0
+httpx>=0.27
