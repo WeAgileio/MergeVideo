@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from api.config import NO_EXPIRY_AT
+
 from sqlalchemy import DateTime, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -40,6 +42,8 @@ class FileRecord(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime)
 
     def is_expired(self, now: datetime | None = None) -> bool:
+        if self.expires_at >= NO_EXPIRY_AT:
+            return False
         moment = now or utcnow()
         return self.expires_at < moment and self.active_jobs <= 0
 

@@ -11,14 +11,13 @@ import tempfile
 import time
 import traceback
 import uuid
-from datetime import timedelta
 from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 import api  # noqa: F401  # 確保 repo 根目錄在 sys.path，才能 import 核心模組
-from api.config import get_settings
+from api.config import compute_file_expires_at, expires_at_to_api, get_settings
 from api.db import init_db, session_scope
 from api.models import FileRecord, JobRecord, JobStatus, utcnow
 from api.routes.files import _probe_metadata
@@ -34,7 +33,7 @@ from api.services.url_import import (
 from extract_frame import extract_first_frame, extract_last_frame
 from merger import merge_auto
 
-_CLEANUP_INTERVAL_SECONDS = 60.0
+_CLEANUP_INTERVAL_SECONDS = 60.0  # fallback；正式值由 config 提供
 
 
 def claim_next_job(session: Session) -> JobRecord | None:
@@ -165,7 +164,7 @@ def _run_import_url(job: JobRecord, session: Session, storage: Storage, tmp: Pat
     storage.put(storage_key, dest, "video/mp4")
 
     now = utcnow()
-    expires_at = now + timedelta(hours=settings.file_ttl_hours)
+    expires_at = compute_file_expires_at(now, settings.file_ttl_hours)
     record = FileRecord(
         file_id=file_id,
         owner_key=job.owner_key,
@@ -184,7 +183,7 @@ def _run_import_url(job: JobRecord, session: Session, storage: Storage, tmp: Pat
         "file_id": file_id,
         "filename": filename,
         "size_bytes": record.size_bytes,
-        "expires_at": expires_at.isoformat(timespec="seconds") + "Z",
+        "expires_at": expires_at_to_api(expires_at),
     }
 
 
@@ -253,14 +252,20 @@ def run_forever() -> None:
     init_db()
     storage = get_storage()
     queue = get_queue()
+    settings = get_settings()
     last_cleanup = 0.0
+    cleanup_interval = (
+        settings.cleanup_interval_seconds
+        if settings.auto_cleanup_enabled
+        else _CLEANUP_INTERVAL_SECONDS
+    )
     print("Worker 已啟動，等待任務...")
 
     while True:
         with session_scope() as session:
             worked = process_next(session, storage)
 
-            if time.monotonic() - last_cleanup > _CLEANUP_INTERVAL_SECONDS:
+            if settings.auto_cleanup_enabled and time.monotonic() - last_cleanup > cleanup_interval:
                 removed = cleanup_expired(session, storage)
                 if removed:
                     print(f"清理過期資源: {removed} 筆")

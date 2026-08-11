@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
+
+# DB 中表示「永不過期」的 sentinel（API 對外回傳 null）
+NO_EXPIRY_AT = datetime(9999, 12, 31, 23, 59, 59)
 
 
 def _split_csv(value: str) -> tuple[str, ...]:
@@ -37,6 +41,8 @@ class Settings:
     file_ttl_hours: int
     result_ttl_hours: int
     download_url_ttl_hours: int
+    auto_cleanup_enabled: bool
+    cleanup_interval_seconds: float
     cors_origins: tuple[str, ...]
     import_url_allow_http: bool
     import_url_connect_timeout_sec: float
@@ -67,9 +73,12 @@ def get_settings() -> Settings:
         api_keys=_split_csv(os.getenv("API_KEYS", "")),
         max_file_size_bytes=int(os.getenv("MAX_FILE_SIZE_MB", "200")) * 1024 * 1024,
         max_merge_files=int(os.getenv("MAX_MERGE_FILES", "10")),
-        file_ttl_hours=int(os.getenv("FILE_TTL_HOURS", "24")),
-        result_ttl_hours=int(os.getenv("RESULT_TTL_HOURS", "72")),
+        file_ttl_hours=int(os.getenv("FILE_TTL_HOURS", "0")),
+        result_ttl_hours=int(os.getenv("RESULT_TTL_HOURS", "0")),
         download_url_ttl_hours=int(os.getenv("DOWNLOAD_URL_TTL_HOURS", "24")),
+        auto_cleanup_enabled=os.getenv("AUTO_CLEANUP_ENABLED", "false").lower()
+        in ("1", "true", "yes"),
+        cleanup_interval_seconds=float(os.getenv("CLEANUP_INTERVAL_SECONDS", "60")),
         cors_origins=_split_csv(os.getenv("CORS_ORIGINS", "*")) or ("*",),
         import_url_allow_http=os.getenv("IMPORT_URL_ALLOW_HTTP", "false").lower()
         in ("1", "true", "yes"),
@@ -82,3 +91,20 @@ def get_settings() -> Settings:
 def reset_settings_cache() -> None:
     """測試用：環境變數變更後重載設定。"""
     get_settings.cache_clear()
+
+
+def file_expiry_enabled(settings: Settings | None = None) -> bool:
+    settings = settings or get_settings()
+    return settings.file_ttl_hours > 0
+
+
+def compute_file_expires_at(now: datetime, ttl_hours: int) -> datetime:
+    if ttl_hours <= 0:
+        return NO_EXPIRY_AT
+    return now + timedelta(hours=ttl_hours)
+
+
+def expires_at_to_api(expires_at: datetime) -> str | None:
+    if expires_at >= NO_EXPIRY_AT:
+        return None
+    return expires_at.isoformat(timespec="seconds") + "Z"

@@ -92,7 +92,7 @@ def test_expired_file_rejected(client, auth_a, video_dir):
 
     with session_scope() as session:
         record = session.get(FileRecord, uploaded["file_id"])
-        record.expires_at = record.expires_at - datetime.timedelta(days=30)
+        record.expires_at = datetime.datetime(2020, 1, 1)
         session.commit()
 
     response = client.post(

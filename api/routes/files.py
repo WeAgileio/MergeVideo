@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 import tempfile
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, UploadFile
 from sqlalchemy.orm import Session
 
 from api.auth import require_api_key
-from api.config import get_settings
+from api.config import compute_file_expires_at, expires_at_to_api, get_settings
 from api.db import get_session
 from api.errors import ApiError, file_not_found
 from api.models import FileRecord, utcnow
@@ -55,7 +55,7 @@ def _file_response(record: FileRecord) -> dict:
         "size_bytes": record.size_bytes,
         "content_type": record.content_type,
         "created_at": _iso(record.created_at),
-        "expires_at": _iso(record.expires_at),
+        "expires_at": expires_at_to_api(record.expires_at),
     }
     if record.metadata_json:
         payload["metadata"] = json.loads(record.metadata_json)
@@ -81,7 +81,7 @@ _UPLOAD_RESPONSES = {
                     "size_bytes": 52428800,
                     "content_type": "video/mp4",
                     "created_at": "2026-07-29T02:00:00Z",
-                    "expires_at": "2026-07-30T02:00:00Z",
+                    "expires_at": None,
                     "metadata": {
                         "width": 2560,
                         "height": 1440,
@@ -107,7 +107,8 @@ _UPLOAD_RESPONSES = {
         "以 multipart/form-data 上傳單一影片（欄位名 `file`），回傳 `file_id` 供後續任務引用。\n\n"
         "- 支援格式：mp4 / mov / webm / mkv / avi / m4v\n"
         "- 單檔大小上限由 `MAX_FILE_SIZE_MB` 控制（預設 200 MB）\n"
-        "- 檔案有 TTL（預設 24h），被進行中任務引用時自動延長"
+        "- `FILE_TTL_HOURS=0`（預設）表示永不過期；> 0 時依小時數邏輯過期，"
+        "被進行中任務引用時不會過期"
     ),
     responses=_UPLOAD_RESPONSES,
 )
@@ -159,7 +160,7 @@ async def upload_file(
             content_type="video/mp4",
             metadata_json=_probe_metadata(tmp_path),
             created_at=now,
-            expires_at=now + timedelta(hours=settings.file_ttl_hours),
+            expires_at=compute_file_expires_at(now, settings.file_ttl_hours),
         )
         session.add(record)
         session.commit()

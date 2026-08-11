@@ -37,6 +37,7 @@ services:
       PUBLIC_BASE_URL: http://localhost:8000
       API_KEYS: change-me
       # URL import：預設只允許 https（IMPORT_URL_ALLOW_HTTP=true 可開 http）
+      # 保留策略預設：永久保留（AUTO_CLEANUP_ENABLED=false, FILE/RESULT_TTL_HOURS=0）
     volumes:
       - api_data:/data
     depends_on:

@@ -316,9 +316,29 @@ STORAGE_BACKEND=rclone RCLONE_REMOTE=gdrive:mergevideo \
 
 Note: `gcs` / `azure` need extra packages (see comments in `requirements-api.txt`). rclone share links have no expiry control—fine for internal workflows, not for strict access control.
 
+### Retention and cleanup
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FILE_TTL_HOURS` | `0` | `0` = uploads never expire; > 0 enables logical expiry |
+| `RESULT_TTL_HOURS` | `0` | `0` = job results kept indefinitely |
+| `AUTO_CLEANUP_ENABLED` | `false` | Whether the worker physically deletes expired resources |
+| `CLEANUP_INTERVAL_SECONDS` | `60` | Cleanup interval (when enabled) |
+| `DOWNLOAD_URL_TTL_HOURS` | `24` | Single presigned URL lifetime |
+
+**Breaking change:** Deployments without explicit env now retain files/results indefinitely instead of auto-expiring after 24h/72h. To restore previous behavior:
+
+```bash
+AUTO_CLEANUP_ENABLED=true
+FILE_TTL_HOURS=24
+RESULT_TTL_HOURS=72
+```
+
+Manual delete: `DELETE /v1/files/{file_id}`.
+
 ### Key Settings (Environment Variables)
 
-See `.env.example`: `API_KEYS`, `STORAGE_BACKEND`, `REDIS_URL`, `MAX_FILE_SIZE_MB` (default 200), `FILE_TTL_HOURS`, `DOWNLOAD_URL_TTL_HOURS`, `IMPORT_URL_ALLOW_HTTP`, etc.
+See `.env.example`: `API_KEYS`, `STORAGE_BACKEND`, `REDIS_URL`, `MAX_FILE_SIZE_MB` (default 200), `AUTO_CLEANUP_ENABLED`, `FILE_TTL_HOURS`, `DOWNLOAD_URL_TTL_HOURS`, `IMPORT_URL_ALLOW_HTTP`, etc.
 
 ### Tests
 
@@ -361,6 +381,15 @@ MergeVideo/
 | ffmpeg / ffprobe not found | Not installed or not on PATH |
 | Please provide a single video file path | VideoFirstFrame / VideoLastFrame received a folder |
 | No video stream found | Input file has no video stream |
+
+## Release Notes
+
+### v2.0.0
+
+- **HTTP API**: upload, merge, and frame-extraction async jobs; Docker Compose deployment; switchable storage backends
+- **URL import**: `POST /v1/jobs/import-url` downloads on the server and returns `file_id`
+- **Retention (Breaking)**: default is indefinite retention (`FILE_TTL_HOURS=0`, `RESULT_TTL_HOURS=0`, `AUTO_CLEANUP_ENABLED=false`); restore previous 24h/72h auto-cleanup via env
+- **Manual delete**: `DELETE /v1/files/{file_id}`
 
 ## License
 

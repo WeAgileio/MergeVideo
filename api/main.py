@@ -38,8 +38,17 @@ _API_DESCRIPTION = """\
 1. **建立任務** — `POST /v1/jobs/merge`（合併，`file_ids` 依陣列順序）或
    `POST /v1/jobs/extract-first-frame` / `extract-last-frame`（取幀）
 2. **輪詢狀態** — `GET /v1/jobs/{job_id}`，狀態 `queued → processing → done / failed`
-3. **取得結果** — merge/extract 的 `done` 含 `result.download_url`（presigned URL）；
+3. **取得結果** — merge/extract 的 `done` 含 `result.download_url`（presigned URL，每次查詢重新簽發）；
    import-url 的 `done` 含 `result.file_id`（供後續任務引用）
+
+## 保留與清理（預設：永久保留）
+
+- `FILE_TTL_HOURS=0`（預設）：上傳 / import 的 `file_id` **永不過期**，`expires_at` 為 `null`
+- `RESULT_TTL_HOURS=0`（預設）：merge / extract 的 job 結果 **永久保留**
+- `AUTO_CLEANUP_ENABLED=false`（預設）：Worker **不**背景刪除檔案
+- 恢復舊的自動清理行為：設 `AUTO_CLEANUP_ENABLED=true`、`FILE_TTL_HOURS=24`、`RESULT_TTL_HOURS=72`
+- 手動刪除：`DELETE /v1/files/{file_id}`
+- `DOWNLOAD_URL_TTL_HOURS`：單次 presigned URL 有效期（預設 24h），與結果是否保留無關
 
 ## 認證
 
@@ -69,7 +78,7 @@ _API_DESCRIPTION = """\
 """
 
 _TAGS_METADATA = [
-    {"name": "files", "description": "影片上傳與管理：上傳後取得 `file_id`，同一檔案可重複用於多個任務。檔案有 TTL（預設 24h），被進行中任務引用時不會過期。"},
+    {"name": "files", "description": "影片上傳與管理：上傳後取得 `file_id`，同一檔案可重複用於多個任務。預設永不過期（`FILE_TTL_HOURS=0`）；被進行中任務引用時不會過期。"},
     {"name": "jobs", "description": "非同步處理任務：合併（copy/encode 自動判斷）、取幀、**從 URL 匯入影片**。建立後輪詢 `GET /v1/jobs/{job_id}`；merge/extract 完成取得 download URL，import-url 完成取得 `file_id`。"},
     {"name": "system", "description": "健康檢查等系統端點。"},
 ]

@@ -317,9 +317,29 @@ STORAGE_BACKEND=rclone RCLONE_REMOTE=gdrive:mergevideo \
 
 注意：`gcs` / `azure` 需另安裝對應套件（見 `requirements-api.txt` 註解）；rclone 分享連結無過期時間控制，適合內部流程、不適合需要嚴格權限的場景。
 
+### 保留與清理
+
+| 變數 | 預設 | 說明 |
+|------|------|------|
+| `FILE_TTL_HOURS` | `0` | `0` = 上傳檔永不過期；> 0 時邏輯過期 |
+| `RESULT_TTL_HOURS` | `0` | `0` = job 結果永久保留 |
+| `AUTO_CLEANUP_ENABLED` | `false` | Worker 是否背景物理刪除 |
+| `CLEANUP_INTERVAL_SECONDS` | `60` | 清理間隔（僅 enabled 時） |
+| `DOWNLOAD_URL_TTL_HOURS` | `24` | 單次 presigned URL 有效期 |
+
+**Breaking change：** 未設 env 的部署，行為從「24h 過期 + 自動清」改為「永久保留」。恢復舊行為：
+
+```bash
+AUTO_CLEANUP_ENABLED=true
+FILE_TTL_HOURS=24
+RESULT_TTL_HOURS=72
+```
+
+手動刪除：`DELETE /v1/files/{file_id}`。
+
 ### 主要設定（環境變數）
 
-詳見 `.env.example`：`API_KEYS`、`STORAGE_BACKEND`、`REDIS_URL`、`MAX_FILE_SIZE_MB`（預設 200）、`FILE_TTL_HOURS`、`DOWNLOAD_URL_TTL_HOURS`、`IMPORT_URL_ALLOW_HTTP` 等。
+詳見 `.env.example`：`API_KEYS`、`STORAGE_BACKEND`、`REDIS_URL`、`MAX_FILE_SIZE_MB`（預設 200）、`AUTO_CLEANUP_ENABLED`、`FILE_TTL_HOURS`、`DOWNLOAD_URL_TTL_HOURS`、`IMPORT_URL_ALLOW_HTTP` 等。
 
 ### 測試
 
@@ -362,6 +382,15 @@ MergeVideo/
 | 找不到 ffmpeg / ffprobe | 未安裝或未加入 PATH |
 | 請提供單一影片檔路徑 | VideoFirstFrame / VideoLastFrame 收到資料夾而非檔案 |
 | 找不到影片串流 | 輸入檔不含 video stream |
+
+## Release Notes
+
+### v2.0.0
+
+- **HTTP API**：上傳、合併、取幀非同步 job；Docker Compose 部署；可切換 storage 後端
+- **URL 匯入**：`POST /v1/jobs/import-url`，server 代為下載並回 `file_id`
+- **保留策略（Breaking）**：預設改為永久保留（`FILE_TTL_HOURS=0`、`RESULT_TTL_HOURS=0`、`AUTO_CLEANUP_ENABLED=false`）；恢復舊 24h/72h 自動清理需明確設定 env
+- **手動刪除**：`DELETE /v1/files/{file_id}`
 
 ## License
 

@@ -359,7 +359,7 @@ def create_import_url_job(
                                     "file_id": "f_imported456",
                                     "filename": "clip.mp4",
                                     "size_bytes": 52428800,
-                                    "expires_at": "2026-07-30T02:00:45Z",
+                                    "expires_at": None,
                                 },
                             },
                         },
