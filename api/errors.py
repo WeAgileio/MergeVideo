@@ -25,3 +25,27 @@ def job_not_found(job_id: str) -> ApiError:
 
 def invalid_url(message: str) -> ApiError:
     return ApiError(400, "INVALID_URL", message)
+
+
+def script_required() -> ApiError:
+    return ApiError(400, "SCRIPT_REQUIRED", "請提供文字稿 script")
+
+
+def script_empty() -> ApiError:
+    return ApiError(400, "SCRIPT_EMPTY", "文字稿不可為空白")
+
+
+def script_too_long(max_chars: int) -> ApiError:
+    return ApiError(400, "SCRIPT_TOO_LONG", f"文字稿超過上限 {max_chars} 字")
+
+
+def wrong_file_type(message: str) -> ApiError:
+    return ApiError(400, "WRONG_FILE_TYPE", message)
+
+
+def invalid_margin(message: str) -> ApiError:
+    return ApiError(400, "INVALID_MARGIN", message)
+
+
+def invalid_font_size(message: str) -> ApiError:
+    return ApiError(400, "INVALID_FONT_SIZE", message)

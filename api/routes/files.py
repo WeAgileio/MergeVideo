@@ -21,6 +21,10 @@ from scanner import VIDEO_EXTENSIONS
 
 router = APIRouter(prefix="/v1/files", tags=["files"])
 
+SRT_EXTENSIONS = {".srt"}
+SRT_CONTENT_TYPE = "application/x-subrip"
+_UPLOAD_EXTENSIONS = VIDEO_EXTENSIONS | SRT_EXTENSIONS
+
 _CHUNK_SIZE = 1024 * 1024
 
 
@@ -102,10 +106,11 @@ _UPLOAD_RESPONSES = {
 @router.post(
     "",
     status_code=201,
-    summary="上傳影片",
+    summary="上傳影片或 SRT",
     description=(
-        "以 multipart/form-data 上傳單一影片（欄位名 `file`），回傳 `file_id` 供後續任務引用。\n\n"
-        "- 支援格式：mp4 / mov / webm / mkv / avi / m4v\n"
+        "以 multipart/form-data 上傳單一檔案（欄位名 `file`），回傳 `file_id` 供後續任務引用。\n\n"
+        "- 支援影片：mp4 / mov / webm / mkv / avi / m4v\n"
+        "- 支援字幕：srt（`content_type: application/x-subrip`，可供 burn-subtitle 引用）\n"
         "- 單檔大小上限由 `MAX_FILE_SIZE_MB` 控制（預設 200 MB）\n"
         "- `FILE_TTL_HOURS=0`（預設）表示永不過期；> 0 時依小時數邏輯過期，"
         "被進行中任務引用時不會過期"
@@ -121,12 +126,15 @@ async def upload_file(
 
     filename = Path(file.filename or "video.mp4").name
     suffix = Path(filename).suffix.lower()
-    if suffix not in VIDEO_EXTENSIONS:
+    if suffix not in _UPLOAD_EXTENSIONS:
         raise ApiError(
             400,
             "UNSUPPORTED_FORMAT",
-            f"不支援的檔案格式: {suffix or '(無副檔名)'}，支援: {', '.join(sorted(VIDEO_EXTENSIONS))}",
+            f"不支援的檔案格式: {suffix or '(無副檔名)'}，支援: {', '.join(sorted(_UPLOAD_EXTENSIONS))}",
         )
+
+    is_srt = suffix in SRT_EXTENSIONS
+    content_type = SRT_CONTENT_TYPE if is_srt else "video/mp4"
 
     size = 0
     tmp_path: Path | None = None
@@ -148,7 +156,7 @@ async def upload_file(
 
         file_id = f"f_{uuid.uuid4().hex[:12]}"
         storage_key = f"uploads/{file_id}/original{suffix}"
-        get_storage().put(storage_key, tmp_path, "video/mp4")
+        get_storage().put(storage_key, tmp_path, content_type)
 
         now = utcnow()
         record = FileRecord(
@@ -157,8 +165,8 @@ async def upload_file(
             filename=filename,
             storage_key=storage_key,
             size_bytes=size,
-            content_type="video/mp4",
-            metadata_json=_probe_metadata(tmp_path),
+            content_type=content_type,
+            metadata_json=None if is_srt else _probe_metadata(tmp_path),
             created_at=now,
             expires_at=compute_file_expires_at(now, settings.file_ttl_hours),
         )

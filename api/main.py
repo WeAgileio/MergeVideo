@@ -26,7 +26,7 @@ _API_DESCRIPTION = """\
 
 ### 方式 A：上傳檔案
 
-1. **上傳影片** — `POST /v1/files`（multipart，欄位 `file`），取得 `file_id`
+1. **上傳影片或 SRT** — `POST /v1/files`（multipart，欄位 `file`），取得 `file_id`
 
 ### 方式 B：從 URL 匯入
 
@@ -35,10 +35,13 @@ _API_DESCRIPTION = """\
 
 ### 處理（兩種方式取得 `file_id` 後相同）
 
-1. **建立任務** — `POST /v1/jobs/merge`（合併，`file_ids` 依陣列順序）或
-   `POST /v1/jobs/extract-first-frame` / `extract-last-frame`（取幀）
+1. **建立任務** — `POST /v1/jobs/merge`（合併，`file_ids` 依陣列順序）、
+   `POST /v1/jobs/extract-first-frame` / `extract-last-frame`（取幀）、
+   `POST /v1/jobs/generate-subtitle`（有稿字幕，需 `script`），或
+   `POST /v1/jobs/burn-subtitle`（把 SRT 燒進影片）
 2. **輪詢狀態** — `GET /v1/jobs/{job_id}`，狀態 `queued → processing → done / failed`
-3. **取得結果** — merge/extract 的 `done` 含 `result.download_url`（presigned URL，每次查詢重新簽發）；
+3. **取得結果** — merge/extract/burn-subtitle 的 `done` 含 `result.download_url`（presigned URL，每次查詢重新簽發）；
+   generate-subtitle 的 `done` 含 `file_id` 與 `download_url`；
    import-url 的 `done` 含 `result.file_id`（供後續任務引用）
 
 ## 保留與清理（預設：永久保留）
@@ -70,16 +73,27 @@ _API_DESCRIPTION = """\
 | `FILE_NOT_FOUND` | file_id 不存在、已過期或非本人所有 |
 | `UNAUTHORIZED_FILE` | 以他人檔案建立任務 |
 | `FILE_TOO_LARGE` | 超過單檔大小上限（預設 200 MB） |
-| `UNSUPPORTED_FORMAT` | 不支援的影片格式 |
+| `UNSUPPORTED_FORMAT` | 不支援的影片或字幕格式 |
 | `INSUFFICIENT_FILES` / `TOO_MANY_FILES` | 合併片段數量不符 |
 | `FILE_PINNED` | 檔案正被進行中任務使用，無法刪除 |
 | `JOB_NOT_FOUND` | job_id 不存在或非本人所有 |
+| `SCRIPT_REQUIRED` | 未提供文字稿 |
+| `SCRIPT_EMPTY` | 文字稿為空白 |
+| `SCRIPT_TOO_LONG` | 文字稿超過 `FUNASR_MAX_SCRIPT_CHARS` |
+| `NO_AUDIO_STREAM` | 影片沒有音訊軌 |
+| `ALIGN_FAILED` | 強制對齊未產生可用時間戳 |
+| `FUNASR_UNAVAILABLE` | Worker 無法載入 FunASR fa-zh |
+| `WRONG_FILE_TYPE` | burn-subtitle 的影片／SRT 類型不符 |
+| `INVALID_MARGIN` | margin_bottom / margin_unit 無效 |
+| `INVALID_FONT_SIZE` | font_size 超出 1–512 |
+| `INVALID_SRT` | SRT 無法解析或沒有 cue |
+| `FONT_UNAVAILABLE` | 找不到內建字幕字型 |
 | `FFMPEG_ERROR` | 影片處理失敗 |
 """
 
 _TAGS_METADATA = [
-    {"name": "files", "description": "影片上傳與管理：上傳後取得 `file_id`，同一檔案可重複用於多個任務。預設永不過期（`FILE_TTL_HOURS=0`）；被進行中任務引用時不會過期。"},
-    {"name": "jobs", "description": "非同步處理任務：合併（copy/encode 自動判斷）、取幀、**從 URL 匯入影片**。建立後輪詢 `GET /v1/jobs/{job_id}`；merge/extract 完成取得 download URL，import-url 完成取得 `file_id`。"},
+    {"name": "files", "description": "檔案上傳與管理：影片或 `.srt` 上傳後取得 `file_id`。預設永不過期（`FILE_TTL_HOURS=0`）；被進行中任務引用時不會過期。"},
+    {"name": "jobs", "description": "非同步處理任務：合併（copy/encode 自動判斷）、取幀、從 URL 匯入、有稿產生 SRT、**燒字幕進影片**。建立後輪詢 `GET /v1/jobs/{job_id}`。"},
     {"name": "system", "description": "健康檢查等系統端點。"},
 ]
 

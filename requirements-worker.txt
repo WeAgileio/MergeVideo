@@ -1,0 +1,5 @@
+-r requirements-api.txt
+funasr
+torch
+torchaudio
+soundfile

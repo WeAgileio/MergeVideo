@@ -1,0 +1,14 @@
+.git
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+api_data
+.env
+.env.local
+test_data
+.cursor
+openspec
+*.md
+!README.md
+!README.en.md

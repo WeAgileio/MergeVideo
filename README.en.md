@@ -214,6 +214,8 @@ In addition to the CLI, a REST API (FastAPI) is available for cloud web services
 
 ```bash
 pip install -r requirements-api.txt
+# Subtitle jobs need FunASR / PyTorch on the worker (~1.5–3GB extra image size, reserve 1–2GB RAM)
+pip install -r requirements-worker.txt
 cp .env.example .env   # set API_KEYS and other config
 
 # API server
@@ -223,7 +225,7 @@ uvicorn api.main:create_app --factory --reload
 python -m api.worker
 ```
 
-Or use Docker Compose (includes MinIO + Redis):
+Or use Docker Compose (includes MinIO + Redis). The subtitle worker uses `Dockerfile.worker` (PyTorch). The first start downloads the `fa-zh` model (needs network); later runs use the `funasr_models` volume cache:
 
 ```bash
 docker compose up --build
@@ -243,14 +245,16 @@ Once the service is running:
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/v1/files` | Upload a video (multipart, field `file`), returns `file_id` |
+| `POST` | `/v1/files` | Upload a video or `.srt` (multipart, field `file`), returns `file_id` |
 | `GET` | `/v1/files/{file_id}` | Get file metadata |
 | `DELETE` | `/v1/files/{file_id}` | Delete a file |
 | `POST` | `/v1/jobs/merge` | Merge videos; order follows **`file_ids` array order**; auto copy/encode internally |
 | `POST` | `/v1/jobs/extract-first-frame` | Extract first frame as PNG |
 | `POST` | `/v1/jobs/extract-last-frame` | Extract last frame as PNG |
 | `POST` | `/v1/jobs/import-url` | Import video from URL (async); returns `file_id` when done |
-| `GET` | `/v1/jobs/{job_id}` | Get job status; includes `progress`; merge/extract `done` returns `download_url`, import `done` returns `file_id` |
+| `POST` | `/v1/jobs/generate-subtitle` | Forced-align SRT from a required `script`; `done` returns `file_id` and a `.srt` download URL |
+| `POST` | `/v1/jobs/burn-subtitle` | Burn an SRT into the video; optional font size and bottom margin |
+| `GET` | `/v1/jobs/{job_id}` | Get job status; includes `progress`; merge/extract/burn `done` returns `download_url`; generate-subtitle also returns `file_id`; import `done` returns `file_id` |
 | `GET` | `/health` | Health check (includes ffmpeg availability) |
 
 All `/v1/*` endpoints require `Authorization: Bearer <api_key>`.
@@ -290,6 +294,35 @@ IMPORT=$(curl -s -X POST "$BASE/v1/jobs/import-url" -H "Authorization: Bearer $K
 curl -s "$BASE/v1/jobs/$IMPORT" -H "Authorization: Bearer $KEY"
 
 # 3. Use file_id in merge / extract jobs (same as above)
+```
+
+### Generate SRT from a script
+
+The worker runs FunASR `fa-zh` in-process (not funasr-server). The script must match the spoken audio; cue text comes from the script.
+
+```bash
+SUB=$(curl -s -X POST "$BASE/v1/jobs/generate-subtitle" -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"file_id\": \"$F1\", \"script\": \"Hello everyone. Welcome to this episode.\"}" \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['job_id'])")
+
+curl -s "$BASE/v1/jobs/$SUB" -H "Authorization: Bearer $KEY"
+```
+
+### Burn subtitles into a video
+
+Two-step: get an SRT (`generate-subtitle` `result.file_id`, or upload a `.srt`), then burn it in. Always re-encodes. Defaults: Taipei Sans TC Beta, font size 48, bottom margin 6 percent, bottom-center, white text with black outline.
+
+```bash
+SRT=$(curl -s -X POST "$BASE/v1/files" -H "Authorization: Bearer $KEY" \
+  -F "file=@talk.srt" | python3 -c "import sys,json;print(json.load(sys.stdin)['file_id'])")
+
+BURN=$(curl -s -X POST "$BASE/v1/jobs/burn-subtitle" -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"file_id\": \"$F1\", \"srt_file_id\": \"$SRT\"}" \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['job_id'])")
+
+curl -s "$BASE/v1/jobs/$BURN" -H "Authorization: Bearer $KEY"
 ```
 
 ### Storage Backends (switch at startup)
@@ -383,6 +416,13 @@ MergeVideo/
 | No video stream found | Input file has no video stream |
 
 ## Release Notes
+
+### v2.1.0
+
+- **Scripted subtitles**: `POST /v1/jobs/generate-subtitle` takes a required `script`; the worker aligns with FunASR `fa-zh` and returns SRT. `done` includes both `file_id` and a download URL
+- **Burn-in subtitles**: `POST /v1/jobs/burn-subtitle` burns an SRT into the video. Optional `font_size` and `margin_bottom` (`px` or `percent`). Defaults: Taipei Sans TC Beta, size 48, 6% from the bottom, bottom-center, white text with black outline
+- **SRT upload**: `POST /v1/files` accepts `.srt` for burn-in
+- **Deploy**: Worker uses `Dockerfile.worker` (FunASR / PyTorch); the image bundles Taipei Sans TC Beta. Rebuild images to pick this up
 
 ### v2.0.0
 

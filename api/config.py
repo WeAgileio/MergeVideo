@@ -16,6 +16,22 @@ def _split_csv(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
+def _optional_path(value: str | None) -> Path | None:
+    if not value:
+        return None
+    return Path(value)
+
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _resolve_font_path(value: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        path = _REPO_ROOT / path
+    return path
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str
@@ -48,6 +64,10 @@ class Settings:
     import_url_connect_timeout_sec: float
     import_url_total_timeout_sec: float
     import_url_max_redirects: int
+    funasr_device: str
+    funasr_cache_dir: Path | None
+    funasr_max_script_chars: int
+    subtitle_font_path: Path
 
 
 @lru_cache(maxsize=1)
@@ -85,6 +105,12 @@ def get_settings() -> Settings:
         import_url_connect_timeout_sec=float(os.getenv("IMPORT_URL_CONNECT_TIMEOUT_SEC", "10")),
         import_url_total_timeout_sec=float(os.getenv("IMPORT_URL_TOTAL_TIMEOUT_SEC", "600")),
         import_url_max_redirects=int(os.getenv("IMPORT_URL_MAX_REDIRECTS", "3")),
+        funasr_device=os.getenv("FUNASR_DEVICE", "cpu"),
+        funasr_cache_dir=_optional_path(os.getenv("FUNASR_CACHE_DIR")),
+        funasr_max_script_chars=int(os.getenv("FUNASR_MAX_SCRIPT_CHARS", "50000")),
+        subtitle_font_path=_resolve_font_path(
+            os.getenv("SUBTITLE_FONT_PATH", "assets/fonts/TaipeiSansTCBeta-Regular.ttf")
+        ),
     )
 
 

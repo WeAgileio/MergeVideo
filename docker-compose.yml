@@ -36,6 +36,7 @@ services:
       S3_SECRET_KEY: minioadmin
       PUBLIC_BASE_URL: http://localhost:8000
       API_KEYS: change-me
+      SUBTITLE_FONT_PATH: /app/assets/fonts/TaipeiSansTCBeta-Regular.ttf
       # URL import：預設只允許 https（IMPORT_URL_ALLOW_HTTP=true 可開 http）
       # 保留策略預設：永久保留（AUTO_CLEANUP_ENABLED=false, FILE/RESULT_TTL_HOURS=0）
     volumes:
@@ -45,11 +46,17 @@ services:
       - redis
 
   worker:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
     command: python -m api.worker
-    environment: *app_env
+    environment:
+      <<: *app_env
+      FUNASR_DEVICE: cpu
+      FUNASR_CACHE_DIR: /models
     volumes:
       - api_data:/data
+      - funasr_models:/models
     depends_on:
       - minio
       - redis
@@ -57,3 +64,4 @@ services:
 volumes:
   minio_data:
   api_data:
+  funasr_models:

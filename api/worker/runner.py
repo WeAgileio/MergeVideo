@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import time
 import traceback
@@ -20,10 +21,18 @@ import api  # noqa: F401  # 確保 repo 根目錄在 sys.path，才能 import �
 from api.config import compute_file_expires_at, expires_at_to_api, get_settings
 from api.db import init_db, session_scope
 from api.models import FileRecord, JobRecord, JobStatus, utcnow
-from api.routes.files import _probe_metadata
+from api.routes.files import SRT_CONTENT_TYPE, _probe_metadata
+from api.services.burn_subtitle import burn_subtitles
 from api.services.cleanup import cleanup_expired
+from api.services.funasr_align import get_align_model
 from api.services.queue import get_queue
 from api.services.storage import Storage, get_storage
+from api.services.subtitle import (
+    SubtitleJobError,
+    cues_from_alignment,
+    format_srt,
+    parse_timestamps,
+)
 from api.services.url_import import (
     UrlImportError,
     download_url_to_file,
@@ -187,6 +196,182 @@ def _run_import_url(job: JobRecord, session: Session, storage: Storage, tmp: Pat
     }
 
 
+def _set_progress(job: JobRecord, session: Session, percent: int) -> None:
+    job.progress = min(percent, 99)
+    session.commit()
+
+
+def _extract_16k_mono_wav(video: Path, wav: Path) -> None:
+    probe = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "csv=p=0",
+            str(video),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if not probe.stdout.strip():
+        raise SubtitleJobError("NO_AUDIO_STREAM", "輸入檔沒有音訊軌")
+
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-f",
+            "wav",
+            str(wav),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "ffmpeg 抽音失敗")
+
+
+def _run_generate_subtitle(
+    job: JobRecord, session: Session, storage: Storage, tmp: Path
+) -> dict:
+    payload = json.loads(job.input_json)
+    file_id: str = payload["file_ids"][0]
+    script: str = payload["script"]
+
+    _set_progress(job, session, 10)
+    record = session.get(FileRecord, file_id)
+    if record is None:
+        raise RuntimeError(f"輸入檔已不存在: {file_id}")
+
+    stem = Path(record.filename).stem or "video"
+    dest = tmp / f"{stem}{Path(record.storage_key).suffix}"
+    storage.fetch(record.storage_key, dest)
+
+    _set_progress(job, session, 20)
+    wav = tmp / "audio.wav"
+    _extract_16k_mono_wav(dest, wav)
+
+    _set_progress(job, session, 50)
+    text_path = tmp / "text.txt"
+    text_path.write_text(script.strip(), encoding="utf-8")
+
+    model = get_align_model()
+    try:
+        raw = model.generate(
+            input=(str(wav), str(text_path)),
+            data_type=("sound", "text"),
+        )
+    except SubtitleJobError:
+        raise
+    except Exception as exc:
+        raise SubtitleJobError("ALIGN_FAILED", f"對齊失敗: {exc}") from exc
+
+    timestamps = parse_timestamps(raw)
+    srt_text = format_srt(cues_from_alignment(script, timestamps))
+
+    _set_progress(job, session, 90)
+    filename = f"{stem}.srt"
+    srt_path = tmp / filename
+    srt_path.write_text(srt_text, encoding="utf-8")
+
+    settings = get_settings()
+    srt_file_id = f"f_{uuid.uuid4().hex[:12]}"
+    storage_key = f"uploads/{srt_file_id}/original.srt"
+    storage.put(storage_key, srt_path, SRT_CONTENT_TYPE)
+
+    now = utcnow()
+    expires_at = compute_file_expires_at(now, settings.file_ttl_hours)
+    session.add(
+        FileRecord(
+            file_id=srt_file_id,
+            owner_key=job.owner_key,
+            filename=filename,
+            storage_key=storage_key,
+            size_bytes=srt_path.stat().st_size,
+            content_type=SRT_CONTENT_TYPE,
+            created_at=now,
+            expires_at=expires_at,
+        )
+    )
+    session.flush()
+
+    return {
+        "file_id": srt_file_id,
+        "storage_key": storage_key,
+        "filename": filename,
+        "content_type": SRT_CONTENT_TYPE,
+        "size_bytes": srt_path.stat().st_size,
+    }
+
+
+def _run_burn_subtitle(
+    job: JobRecord, session: Session, storage: Storage, tmp: Path
+) -> dict:
+    payload = json.loads(job.input_json)
+    video_id: str = payload["file_ids"][0]
+    srt_id: str = payload.get("srt_file_id") or payload["file_ids"][1]
+    font_size = int(payload.get("font_size", 48))
+    margin_bottom = float(payload.get("margin_bottom", 6))
+    margin_unit = str(payload.get("margin_unit", "percent"))
+
+    _set_progress(job, session, 10)
+    video_record = session.get(FileRecord, video_id)
+    srt_record = session.get(FileRecord, srt_id)
+    if video_record is None or srt_record is None:
+        raise RuntimeError("輸入檔已不存在")
+
+    video_path = tmp / f"video{Path(video_record.storage_key).suffix}"
+    srt_path = tmp / "subs.srt"
+    storage.fetch(video_record.storage_key, video_path)
+    storage.fetch(srt_record.storage_key, srt_path)
+
+    _set_progress(job, session, 15)
+    settings = get_settings()
+    stem = Path(video_record.filename).stem or "video"
+    filename = f"{stem}_burned.mp4"
+    output_path = tmp / filename
+
+    updater = _make_progress_updater(job, session)
+
+    def on_encode(fraction: float) -> None:
+        updater(0.15 + fraction * 0.80)
+
+    burn_subtitles(
+        video_path,
+        srt_path,
+        output_path,
+        font_path=settings.subtitle_font_path,
+        font_size=font_size,
+        margin_bottom=margin_bottom,
+        margin_unit=margin_unit,
+        progress_callback=on_encode,
+    )
+
+    _set_progress(job, session, 98)
+    storage_key = f"results/{job.job_id}/{filename}"
+    storage.put(storage_key, output_path, "video/mp4")
+    return {
+        "storage_key": storage_key,
+        "filename": filename,
+        "content_type": "video/mp4",
+        "size_bytes": output_path.stat().st_size,
+    }
+
+
 def _unpin_files(session: Session, job: JobRecord) -> None:
     payload = json.loads(job.input_json)
     for file_id in set(payload.get("file_ids", [])):
@@ -207,6 +392,10 @@ def process_job(job: JobRecord, session: Session, storage: Storage) -> None:
                 result = _run_extract(job, session, storage, tmp, last=True)
             elif job.type == "import_url":
                 result = _run_import_url(job, session, storage, tmp)
+            elif job.type == "generate_subtitle":
+                result = _run_generate_subtitle(job, session, storage, tmp)
+            elif job.type == "burn_subtitle":
+                result = _run_burn_subtitle(job, session, storage, tmp)
             else:
                 raise RuntimeError(f"未知的任務類型: {job.type}")
 
@@ -214,6 +403,10 @@ def process_job(job: JobRecord, session: Session, storage: Storage) -> None:
         job.progress = 100
         job.result_json = json.dumps(result)
     except UrlImportError as exc:
+        job.status = JobStatus.FAILED
+        job.error_code = exc.code
+        job.error_message = exc.message
+    except SubtitleJobError as exc:
         job.status = JobStatus.FAILED
         job.error_code = exc.code
         job.error_message = exc.message
@@ -260,6 +453,11 @@ def run_forever() -> None:
         else _CLEANUP_INTERVAL_SECONDS
     )
     print("Worker 已啟動，等待任務...")
+    font = settings.subtitle_font_path
+    if font.is_file():
+        print(f"字幕字型: {font}")
+    else:
+        print(f"警告: 找不到字幕字型 {font}，burn-subtitle 會失敗（FONT_UNAVAILABLE）")
 
     while True:
         with session_scope() as session:

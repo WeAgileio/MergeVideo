@@ -214,6 +214,8 @@ chmod +x VideoLastFrame
 
 ```bash
 pip install -r requirements-api.txt
+# 若要跑字幕 job，Worker 需另裝 FunASR / PyTorch（映像約再增 1.5–3GB，RAM 預留 1–2GB）
+pip install -r requirements-worker.txt
 cp .env.example .env   # 修改 API_KEYS 等設定
 
 # API server
@@ -223,7 +225,7 @@ uvicorn api.main:create_app --factory --reload
 python -m api.worker
 ```
 
-或使用 Docker Compose（含 MinIO + Redis）：
+或使用 Docker Compose（含 MinIO + Redis）。字幕 Worker 使用 `Dockerfile.worker`（含 PyTorch）；首次啟動會下載 `fa-zh` 模型（需網路），之後走 `funasr_models` volume 快取：
 
 ```bash
 docker compose up --build
@@ -243,14 +245,16 @@ docker compose up --build
 
 | Method | Path | 用途 |
 |--------|------|------|
-| `POST` | `/v1/files` | 上傳影片（multipart，欄位 `file`），回 `file_id` |
+| `POST` | `/v1/files` | 上傳影片或 `.srt`（multipart，欄位 `file`），回 `file_id` |
 | `GET` | `/v1/files/{file_id}` | 查檔案 metadata |
 | `DELETE` | `/v1/files/{file_id}` | 刪除檔案 |
 | `POST` | `/v1/jobs/merge` | 合併，`file_ids` 依**陣列順序**，內部自動選 copy/encode |
 | `POST` | `/v1/jobs/extract-first-frame` | 取第一幀 PNG |
 | `POST` | `/v1/jobs/extract-last-frame` | 取最後一幀 PNG |
 | `POST` | `/v1/jobs/import-url` | 從 URL 匯入影片（非同步），done 回 `file_id` |
-| `GET` | `/v1/jobs/{job_id}` | 查 job 狀態；含 `progress`；merge/extract `done` 回 `download_url`，import `done` 回 `file_id` |
+| `POST` | `/v1/jobs/generate-subtitle` | 有稿產生 SRT（必填 `script`），done 回 `file_id` 與 `.srt` download URL |
+| `POST` | `/v1/jobs/burn-subtitle` | 把 SRT 燒進影片；可選字級與離底邊距離 |
+| `GET` | `/v1/jobs/{job_id}` | 查 job 狀態；含 `progress`；merge/extract/burn `done` 回 `download_url`，generate-subtitle 另回 `file_id`，import 回 `file_id` |
 | `GET` | `/health` | 健康檢查（含 ffmpeg 可用性） |
 
 所有 `/v1/*` 皆需 `Authorization: Bearer <api_key>`。
@@ -291,6 +295,42 @@ curl -s "$BASE/v1/jobs/$IMPORT" -H "Authorization: Bearer $KEY"
 # {"status": "done", "result": {"file_id": "f_...", ...}}
 
 # 3. 用 file_id 接 merge / extract（同上）
+```
+
+### 有稿產生 SRT 字幕
+
+Worker 內以 FunASR `fa-zh` 對齊時間軸（不是 funasr-server）。文字稿須與發音對應；字幕文字以稿為準。
+
+```bash
+# 1. 已有 file_id（上傳或 import-url）
+SUB=$(curl -s -X POST "$BASE/v1/jobs/generate-subtitle" -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"file_id\": \"$F1\", \"script\": \"大家好。歡迎收看本期內容。\"}" \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['job_id'])")
+
+# 2. 輪詢直到 done，取得 file_id 與 download_url
+curl -s "$BASE/v1/jobs/$SUB" -H "Authorization: Bearer $KEY"
+# {"status": "done", "result": {"file_id": "f_...", "filename": "1.srt", "download_url": "..."}}
+```
+
+### 燒字幕進影片
+
+兩段式：先有 SRT（generate-subtitle 的 `result.file_id`，或自行上傳 `.srt`），再燒進畫面。必定重編碼。預設字型為台北黑體、字級 48、離底 6%、底部水平置中、白字黑描邊。
+
+```bash
+# 可用 generate-subtitle 回傳的 file_id，或另外上傳 .srt
+SRT=$(curl -s -X POST "$BASE/v1/files" -H "Authorization: Bearer $KEY" \
+  -F "file=@talk.srt" | python3 -c "import sys,json;print(json.load(sys.stdin)['file_id'])")
+
+BURN=$(curl -s -X POST "$BASE/v1/jobs/burn-subtitle" -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"file_id\": \"$F1\", \"srt_file_id\": \"$SRT\"}" \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['job_id'])")
+
+# 可選樣式：font_size、margin_bottom、margin_unit（px 或 percent）
+# -d '{"file_id":"...","srt_file_id":"...","font_size":48,"margin_bottom":6,"margin_unit":"percent"}'
+
+curl -s "$BASE/v1/jobs/$BURN" -H "Authorization: Bearer $KEY"
 ```
 
 ### 檔案儲存後端（啟動時切換）
@@ -384,6 +424,13 @@ MergeVideo/
 | 找不到影片串流 | 輸入檔不含 video stream |
 
 ## Release Notes
+
+### v2.1.0
+
+- **有稿字幕**：`POST /v1/jobs/generate-subtitle`，必填文字稿 `script`；Worker 以 FunASR `fa-zh` 對齊並產出 SRT。完成後同時回 `file_id` 與 download URL
+- **燒字幕**：`POST /v1/jobs/burn-subtitle`，把 SRT 燒進影片。可設 `font_size`、`margin_bottom`（`px` 或 `percent`）；預設台北黑體、字級 48、離底 6%、底部水平置中、白字黑邊
+- **上傳 SRT**：`POST /v1/files` 接受 `.srt`，可供 burn 引用
+- **部署**：Worker 使用 `Dockerfile.worker`（含 FunASR／PyTorch）；映像內建台北黑體。需重建映像
 
 ### v2.0.0
 

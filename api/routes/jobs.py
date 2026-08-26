@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
@@ -13,12 +14,31 @@ from sqlalchemy.orm import Session
 from api.auth import require_api_key
 from api.config import get_settings
 from api.db import get_session
-from api.errors import ApiError, invalid_url, job_not_found, unauthorized_file
+from api.errors import (
+    ApiError,
+    invalid_font_size,
+    invalid_margin,
+    invalid_url,
+    job_not_found,
+    script_empty,
+    script_required,
+    script_too_long,
+    unauthorized_file,
+    wrong_file_type,
+)
 from api.models import FileRecord, JobRecord, JobStatus, utcnow
-from api.routes.files import get_owned_file
+from api.routes.files import SRT_EXTENSIONS, get_owned_file
+from api.services.burn_subtitle import (
+    DEFAULT_FONT_SIZE,
+    DEFAULT_MARGIN_BOTTOM,
+    DEFAULT_MARGIN_UNIT,
+    FONT_SIZE_MAX,
+    FONT_SIZE_MIN,
+)
 from api.services.queue import get_queue
 from api.services.storage import get_storage
 from api.services.url_import import UrlImportError, validate_url_scheme
+from scanner import VIDEO_EXTENSIONS
 
 router = APIRouter(prefix="/v1/jobs", tags=["jobs"])
 
@@ -26,6 +46,8 @@ JOB_TYPE_MERGE = "merge"
 JOB_TYPE_FIRST_FRAME = "extract_first_frame"
 JOB_TYPE_LAST_FRAME = "extract_last_frame"
 JOB_TYPE_IMPORT_URL = "import_url"
+JOB_TYPE_GENERATE_SUBTITLE = "generate_subtitle"
+JOB_TYPE_BURN_SUBTITLE = "burn_subtitle"
 
 
 class MergeRequest(BaseModel):
@@ -55,6 +77,38 @@ class ImportUrlRequest(BaseModel):
     )
 
 
+class GenerateSubtitleRequest(BaseModel):
+    file_id: str = Field(description="來源影片的 file_id", examples=["f_aaa111"])
+    script: str | None = Field(
+        default=None,
+        description="一整段文字稿，須與發音對應（必填，不做 ASR、不簡繁轉換）",
+        examples=["大家好。歡迎收看本期內容。"],
+    )
+
+
+class BurnSubtitleRequest(BaseModel):
+    file_id: str = Field(description="來源影片的 file_id", examples=["f_aaa111"])
+    srt_file_id: str = Field(
+        description="SRT 字幕的 file_id（generate-subtitle 的 result.file_id，或上傳的 .srt）",
+        examples=["f_srt111"],
+    )
+    font_size: int | None = Field(
+        default=None,
+        description="ASS FontSize，省略為 48，允許 1–512",
+        examples=[48],
+    )
+    margin_bottom: float | None = Field(
+        default=None,
+        description="離底邊距離，省略為 6；單位見 margin_unit",
+        examples=[6],
+    )
+    margin_unit: str | None = Field(
+        default=None,
+        description="`percent`（預設）或 `px`",
+        examples=["percent"],
+    )
+
+
 _JOB_ACCEPTED_RESPONSE = {
     202: {
         "description": "任務已排入佇列",
@@ -65,6 +119,68 @@ _JOB_ACCEPTED_RESPONSE = {
                     "type": "merge",
                     "status": "queued",
                     "status_url": "/v1/jobs/j_9z8y7x6w5v4u",
+                }
+            }
+        },
+    },
+    403: {"description": "引用了他人的檔案（UNAUTHORIZED_FILE）"},
+    404: {"description": "檔案不存在或已過期（FILE_NOT_FOUND）"},
+}
+
+_SUBTITLE_ACCEPTED_RESPONSE = {
+    202: {
+        "description": "字幕任務已排入佇列",
+        "content": {
+            "application/json": {
+                "example": {
+                    "job_id": "j_sub123abc456",
+                    "type": "generate_subtitle",
+                    "status": "queued",
+                    "status_url": "/v1/jobs/j_sub123abc456",
+                }
+            }
+        },
+    },
+    400: {
+        "description": "文字稿無效（SCRIPT_REQUIRED / SCRIPT_EMPTY / SCRIPT_TOO_LONG）",
+        "content": {
+            "application/json": {
+                "example": {
+                    "error": {
+                        "code": "SCRIPT_EMPTY",
+                        "message": "文字稿不可為空白",
+                    }
+                }
+            }
+        },
+    },
+    403: {"description": "引用了他人的檔案（UNAUTHORIZED_FILE）"},
+    404: {"description": "檔案不存在或已過期（FILE_NOT_FOUND）"},
+}
+
+_BURN_ACCEPTED_RESPONSE = {
+    202: {
+        "description": "燒字幕任務已排入佇列",
+        "content": {
+            "application/json": {
+                "example": {
+                    "job_id": "j_burn123abc45",
+                    "type": "burn_subtitle",
+                    "status": "queued",
+                    "status_url": "/v1/jobs/j_burn123abc45",
+                }
+            }
+        },
+    },
+    400: {
+        "description": "參數或檔案類型無效（WRONG_FILE_TYPE / INVALID_MARGIN / INVALID_FONT_SIZE）",
+        "content": {
+            "application/json": {
+                "example": {
+                    "error": {
+                        "code": "WRONG_FILE_TYPE",
+                        "message": "file_id 必須是影片檔",
+                    }
                 }
             }
         },
@@ -113,6 +229,45 @@ def _resolve_file(session: Session, file_id: str, owner_key: str) -> FileRecord:
     if record is not None and record.owner_key != owner_key:
         raise unauthorized_file(file_id)
     return get_owned_file(session, file_id, owner_key)
+
+
+def _suffix(record: FileRecord) -> str:
+    return Path(record.filename).suffix.lower()
+
+
+def _require_video_file(record: FileRecord) -> None:
+    if _suffix(record) not in VIDEO_EXTENSIONS:
+        raise wrong_file_type("file_id 必須是影片檔")
+
+
+def _require_srt_file(record: FileRecord) -> None:
+    if _suffix(record) not in SRT_EXTENSIONS:
+        raise wrong_file_type("srt_file_id 必須是 .srt 檔")
+
+
+def _normalize_burn_style(
+    font_size: int | None, margin_bottom: float | None, margin_unit: str | None
+) -> dict:
+    size = DEFAULT_FONT_SIZE if font_size is None else font_size
+    if size < FONT_SIZE_MIN or size > FONT_SIZE_MAX:
+        raise invalid_font_size(f"font_size 須介於 {FONT_SIZE_MIN}–{FONT_SIZE_MAX}")
+
+    unit = (margin_unit or DEFAULT_MARGIN_UNIT).strip().lower()
+    if unit not in ("px", "percent"):
+        raise invalid_margin("margin_unit 須為 px 或 percent")
+
+    margin = DEFAULT_MARGIN_BOTTOM if margin_bottom is None else margin_bottom
+    if unit == "percent":
+        if margin < 0 or margin > 100:
+            raise invalid_margin("percent 的 margin_bottom 須介於 0–100")
+    elif margin < 0:
+        raise invalid_margin("px 的 margin_bottom 不可為負數")
+
+    return {
+        "font_size": size,
+        "margin_bottom": margin,
+        "margin_unit": unit,
+    }
 
 
 def _create_job(
@@ -286,14 +441,88 @@ def create_import_url_job(
     )
 
 
+@router.post(
+    "/generate-subtitle",
+    status_code=202,
+    summary="建立有稿字幕任務",
+    description=(
+        "對已上傳的影片產生標準 SRT 字幕（非同步 job）。\n\n"
+        "- 必填 `script`：一整段文字稿，字幕文字以稿為準（不跑 ASR、不簡繁轉換）\n"
+        "- Worker 以 FunASR `fa-zh` 強制對齊時間軸，再依 `。！？!?；，` 分句\n"
+        "- 完成後 `result` 含 `file_id`（可交給 burn-subtitle）與 `.srt` 的 `download_url`\n"
+        "- 失敗時常見 error code：`SCRIPT_REQUIRED`、`SCRIPT_EMPTY`、`SCRIPT_TOO_LONG`、"
+        "`NO_AUDIO_STREAM`、`ALIGN_FAILED`、`FUNASR_UNAVAILABLE`"
+    ),
+    responses=_SUBTITLE_ACCEPTED_RESPONSE,
+)
+def create_generate_subtitle_job(
+    body: GenerateSubtitleRequest,
+    owner_key: str = Depends(require_api_key),
+    session: Session = Depends(get_session),
+) -> dict:
+    settings = get_settings()
+    if body.script is None:
+        raise script_required()
+    if not body.script.strip():
+        raise script_empty()
+    if len(body.script) > settings.funasr_max_script_chars:
+        raise script_too_long(settings.funasr_max_script_chars)
+    return _create_job(
+        session,
+        owner_key=owner_key,
+        job_type=JOB_TYPE_GENERATE_SUBTITLE,
+        file_ids=[body.file_id],
+        extra_input={"script": body.script.strip()},
+    )
+
+
+@router.post(
+    "/burn-subtitle",
+    status_code=202,
+    summary="建立燒字幕任務",
+    description=(
+        "將 SRT 燒進影片畫面（非同步 job，必定重編碼 H.264）。\n\n"
+        "- 必填 `file_id`（影片）與 `srt_file_id`（`.srt`）\n"
+        "- 可選 `font_size`（預設 48）、`margin_bottom`（預設 6）、"
+        "`margin_unit`（`percent` 或 `px`，預設 `percent`）\n"
+        "- 對齊固定底部水平置中；字型為內建台北黑體；白字黑描邊\n"
+        "- 完成後 `result` 含 `*_burned.mp4` 的 `download_url`\n"
+        "- 失敗時常見 error code：`WRONG_FILE_TYPE`、`INVALID_MARGIN`、"
+        "`INVALID_FONT_SIZE`、`INVALID_SRT`、`FONT_UNAVAILABLE`、`FFMPEG_ERROR`"
+    ),
+    responses=_BURN_ACCEPTED_RESPONSE,
+)
+def create_burn_subtitle_job(
+    body: BurnSubtitleRequest,
+    owner_key: str = Depends(require_api_key),
+    session: Session = Depends(get_session),
+) -> dict:
+    style = _normalize_burn_style(body.font_size, body.margin_bottom, body.margin_unit)
+    video = _resolve_file(session, body.file_id, owner_key)
+    srt = _resolve_file(session, body.srt_file_id, owner_key)
+    _require_video_file(video)
+    _require_srt_file(srt)
+    return _create_job(
+        session,
+        owner_key=owner_key,
+        job_type=JOB_TYPE_BURN_SUBTITLE,
+        file_ids=[body.file_id, body.srt_file_id],
+        extra_input={
+            "srt_file_id": body.srt_file_id,
+            **style,
+        },
+    )
+
+
 @router.get(
     "/{job_id}",
     summary="查詢任務狀態",
     description=(
         "輪詢任務狀態。狀態流轉：`queued → processing → done / failed`。\n\n"
-        "- `progress`：處理進度 0–100（merge 依 FFmpeg 時長；import-url 依下載 bytes；"
-        "取幀任務極快，可能直接從 0 跳到 100）\n"
-        "- `done`：merge/extract 含 `result.download_url`；import-url 含 `result.file_id`\n"
+        "- `progress`：處理進度 0–100（merge / burn-subtitle 依 FFmpeg 時長；import-url 依下載 bytes；"
+        "generate-subtitle 依抽音／對齊階段；取幀任務極快，可能直接從 0 跳到 100）\n"
+        "- `done`：merge/extract/burn-subtitle 含 `result.download_url`；"
+        "generate-subtitle 含 `file_id` 與 `download_url`；import-url 含 `result.file_id`\n"
         "- `failed`：回應含 `error.code` 與 `error.message`"
     ),
     responses={
@@ -379,6 +608,77 @@ def create_import_url_job(
                                 },
                             },
                         },
+                        "subtitle_done": {
+                            "summary": "字幕完成",
+                            "value": {
+                                "job_id": "j_sub123abc456",
+                                "type": "generate_subtitle",
+                                "status": "done",
+                                "progress": 100,
+                                "created_at": "2026-08-26T02:00:00Z",
+                                "started_at": "2026-08-26T02:00:01Z",
+                                "completed_at": "2026-08-26T02:00:20Z",
+                                "result": {
+                                    "file_id": "f_srt789abc",
+                                    "download_url": "https://storage.example.com/uploads/f_srt789abc/original.srt?sig=...",
+                                    "expires_at": "2026-08-27T02:00:20Z",
+                                    "filename": "talk.srt",
+                                    "content_type": "application/x-subrip",
+                                    "size_bytes": 512,
+                                },
+                            },
+                        },
+                        "subtitle_failed": {
+                            "summary": "字幕失敗",
+                            "value": {
+                                "job_id": "j_sub123abc456",
+                                "type": "generate_subtitle",
+                                "status": "failed",
+                                "progress": 20,
+                                "created_at": "2026-08-26T02:00:00Z",
+                                "started_at": "2026-08-26T02:00:01Z",
+                                "completed_at": "2026-08-26T02:00:03Z",
+                                "error": {
+                                    "code": "NO_AUDIO_STREAM",
+                                    "message": "輸入檔沒有音訊軌",
+                                },
+                            },
+                        },
+                        "burn_done": {
+                            "summary": "燒字幕完成",
+                            "value": {
+                                "job_id": "j_burn123abc45",
+                                "type": "burn_subtitle",
+                                "status": "done",
+                                "progress": 100,
+                                "created_at": "2026-08-26T02:00:00Z",
+                                "started_at": "2026-08-26T02:00:01Z",
+                                "completed_at": "2026-08-26T02:00:40Z",
+                                "result": {
+                                    "download_url": "https://storage.example.com/results/j_burn123abc45/talk_burned.mp4?sig=...",
+                                    "expires_at": "2026-08-27T02:00:40Z",
+                                    "filename": "talk_burned.mp4",
+                                    "content_type": "video/mp4",
+                                    "size_bytes": 2048000,
+                                },
+                            },
+                        },
+                        "burn_failed": {
+                            "summary": "燒字幕失敗",
+                            "value": {
+                                "job_id": "j_burn123abc45",
+                                "type": "burn_subtitle",
+                                "status": "failed",
+                                "progress": 15,
+                                "created_at": "2026-08-26T02:00:00Z",
+                                "started_at": "2026-08-26T02:00:01Z",
+                                "completed_at": "2026-08-26T02:00:02Z",
+                                "error": {
+                                    "code": "INVALID_SRT",
+                                    "message": "SRT 沒有可用的字幕 cue",
+                                },
+                            },
+                        },
                         "failed": {
                             "summary": "失敗",
                             "value": {
@@ -449,10 +749,13 @@ def _build_result(job: JobRecord) -> dict | None:
     download_url = get_storage().presigned_url(
         result["storage_key"], ttl_seconds, result["filename"]
     )
-    return {
+    payload = {
         "download_url": download_url,
         "expires_at": _iso(utcnow() + timedelta(seconds=ttl_seconds)),
         "filename": result["filename"],
         "content_type": result["content_type"],
         "size_bytes": result["size_bytes"],
     }
+    if result.get("file_id"):
+        payload["file_id"] = result["file_id"]
+    return payload
