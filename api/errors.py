@@ -49,3 +49,21 @@ def invalid_margin(message: str) -> ApiError:
 
 def invalid_font_size(message: str) -> ApiError:
     return ApiError(400, "INVALID_FONT_SIZE", message)
+
+
+def empty_replacements() -> ApiError:
+    return ApiError(400, "EMPTY_REPLACEMENTS", "replacements 至少需要 1 段")
+
+
+def too_many_replacements(max_items: int) -> ApiError:
+    return ApiError(
+        400, "TOO_MANY_REPLACEMENTS", f"replacements 最多支援 {max_items} 段"
+    )
+
+
+def invalid_range(message: str) -> ApiError:
+    return ApiError(400, "INVALID_RANGE", message)
+
+
+def overlapping_ranges(message: str) -> ApiError:
+    return ApiError(400, "OVERLAPPING_RANGES", message)

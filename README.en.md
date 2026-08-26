@@ -245,7 +245,7 @@ Once the service is running:
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/v1/files` | Upload a video or `.srt` (multipart, field `file`), returns `file_id` |
+| `POST` | `/v1/files` | Upload a video, `.srt`, or image (multipart, field `file`), returns `file_id` |
 | `GET` | `/v1/files/{file_id}` | Get file metadata |
 | `DELETE` | `/v1/files/{file_id}` | Delete a file |
 | `POST` | `/v1/jobs/merge` | Merge videos; order follows **`file_ids` array order**; auto copy/encode internally |
@@ -254,7 +254,8 @@ Once the service is running:
 | `POST` | `/v1/jobs/import-url` | Import video from URL (async); returns `file_id` when done |
 | `POST` | `/v1/jobs/generate-subtitle` | Forced-align SRT from a required `script`; `done` returns `file_id` and a `.srt` download URL |
 | `POST` | `/v1/jobs/burn-subtitle` | Burn an SRT into the video; optional font size and bottom margin |
-| `GET` | `/v1/jobs/{job_id}` | Get job status; includes `progress`; merge/extract/burn `done` returns `download_url`; generate-subtitle also returns `file_id`; import `done` returns `file_id` |
+| `POST` | `/v1/jobs/replace-images` | Replace full frames with static images for 1–10 time ranges; `done` returns `file_id` and a download URL |
+| `GET` | `/v1/jobs/{job_id}` | Get job status; includes `progress`; merge/extract/burn `done` returns `download_url`; generate-subtitle and replace-images also return `file_id`; import `done` returns `file_id` |
 | `GET` | `/health` | Health check (includes ffmpeg availability) |
 
 All `/v1/*` endpoints require `Authorization: Bearer <api_key>`.
@@ -323,6 +324,28 @@ BURN=$(curl -s -X POST "$BASE/v1/jobs/burn-subtitle" -H "Authorization: Bearer $
   | python3 -c "import sys,json;print(json.load(sys.stdin)['job_id'])")
 
 curl -s "$BASE/v1/jobs/$BURN" -H "Authorization: Bearer $KEY"
+```
+
+### Replace frames with static images
+
+Up to 10 ranges per job; each range shows only that image. Images are fit with contain: scaled uniformly to fit inside the frame, centered, with black bars filling the rest — never cropped, never stretched. Audio is stream-copied and the output duration matches the source; video is always re-encoded to H.264.
+
+The `done` result carries both a `file_id` (the output is registered in the file registry) and a `download_url`, so you can pass `file_id` straight into a later job such as burn-subtitle. You choose the order: replacing first puts subtitles on top of the images, burning first means those seconds are covered along with their subtitles.
+
+```bash
+# 1. Upload an image (png / jpg / jpeg / webp)
+IMG=$(curl -s -X POST "$BASE/v1/files" -H "Authorization: Bearer $KEY" \
+  -F "file=@slide.png" | python3 -c "import sys,json;print(json.load(sys.stdin)['file_id'])")
+
+# 2. Create the replace job (ranges must not overlap; end may equal the next start)
+REP=$(curl -s -X POST "$BASE/v1/jobs/replace-images" -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"file_id\": \"$F1\", \"replacements\": [{\"image_file_id\": \"$IMG\", \"start\": 3, \"end\": 5}]}" \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['job_id'])")
+
+# 3. Poll until done; get file_id and download_url
+curl -s "$BASE/v1/jobs/$REP" -H "Authorization: Bearer $KEY"
+# {"status": "done", "result": {"file_id": "f_...", "filename": "1_replaced.mp4", "download_url": "..."}}
 ```
 
 ### Storage Backends (switch at startup)
@@ -416,6 +439,14 @@ MergeVideo/
 | No video stream found | Input file has no video stream |
 
 ## Release Notes
+
+### v2.2.0
+
+- **Replace frames with images**: `POST /v1/jobs/replace-images` replaces the full frame with an uploaded static image for 1–10 time ranges. Images are fit with contain (uniform scale, centered, black bars, never cropped or stretched); audio is stream-copied and output duration matches the source
+- **Output chains into the next job**: the `done` result carries both `file_id` and `download_url`, so you can pass `file_id` straight to burn-subtitle. You choose the order of replacing and burning
+- **Image upload**: `POST /v1/files` accepts `.png` / `.jpg` / `.jpeg` / `.webp`
+- **More accurate subtitle timing**: Latin names and numbers (e.g. `Lookonchain`, `96191`) no longer consume later cues' timestamps by letter count, and the last cue now extends to the end of the trailing speech
+- **New error codes**: `EMPTY_REPLACEMENTS`, `TOO_MANY_REPLACEMENTS`, `INVALID_RANGE`, `OVERLAPPING_RANGES`, `INVALID_IMAGE`
 
 ### v2.1.0
 

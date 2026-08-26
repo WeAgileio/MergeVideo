@@ -1,4 +1,4 @@
-"""非同步 job endpoints（merge / extract frame / import url）。"""
+"""非同步 job endpoints（merge / extract / import-url / generate-subtitle / burn-subtitle / replace-images）。"""
 
 from __future__ import annotations
 
@@ -16,18 +16,22 @@ from api.config import get_settings
 from api.db import get_session
 from api.errors import (
     ApiError,
+    empty_replacements,
     invalid_font_size,
     invalid_margin,
+    invalid_range,
     invalid_url,
     job_not_found,
+    overlapping_ranges,
     script_empty,
     script_required,
     script_too_long,
+    too_many_replacements,
     unauthorized_file,
     wrong_file_type,
 )
 from api.models import FileRecord, JobRecord, JobStatus, utcnow
-from api.routes.files import SRT_EXTENSIONS, get_owned_file
+from api.routes.files import IMAGE_EXTENSIONS, SRT_EXTENSIONS, get_owned_file
 from api.services.burn_subtitle import (
     DEFAULT_FONT_SIZE,
     DEFAULT_MARGIN_BOTTOM,
@@ -48,6 +52,9 @@ JOB_TYPE_LAST_FRAME = "extract_last_frame"
 JOB_TYPE_IMPORT_URL = "import_url"
 JOB_TYPE_GENERATE_SUBTITLE = "generate_subtitle"
 JOB_TYPE_BURN_SUBTITLE = "burn_subtitle"
+JOB_TYPE_REPLACE_IMAGES = "replace_images"
+
+MAX_REPLACEMENTS = 10
 
 
 class MergeRequest(BaseModel):
@@ -94,18 +101,35 @@ class BurnSubtitleRequest(BaseModel):
     )
     font_size: int | None = Field(
         default=None,
-        description="ASS FontSize，省略為 48，允許 1–512",
+        description="字級（像素），省略為 48，允許 1–512",
         examples=[48],
     )
     margin_bottom: float | None = Field(
         default=None,
-        description="離底邊距離，省略為 6；單位見 margin_unit",
+        description="離底邊距離，省略為 6。percent 時為畫面高度百分比；px 時為像素",
         examples=[6],
     )
     margin_unit: str | None = Field(
         default=None,
-        description="`percent`（預設）或 `px`",
+        description="`percent`（預設）或 `px`。percent 時實際像素 = round(畫面高度 × margin_bottom / 100)",
         examples=["percent"],
+    )
+
+
+class ReplacementItem(BaseModel):
+    image_file_id: str = Field(
+        description="已上傳圖片的 file_id（png / jpg / jpeg / webp）",
+        examples=["f_img222"],
+    )
+    start: float = Field(description="起始秒數，`>= 0`（含）", examples=[3.0])
+    end: float = Field(description="結束秒數，須 `> start`（含）", examples=[5.0])
+
+
+class ReplaceImagesRequest(BaseModel):
+    file_id: str = Field(description="來源影片的 file_id", examples=["f_aaa111"])
+    replacements: list[ReplacementItem] = Field(
+        default_factory=list,
+        description=f"換圖時段，1–{MAX_REPLACEMENTS} 段，彼此不可重疊（`end` 等於下一段 `start` 可以）",
     )
 
 
@@ -189,6 +213,40 @@ _BURN_ACCEPTED_RESPONSE = {
     404: {"description": "檔案不存在或已過期（FILE_NOT_FOUND）"},
 }
 
+_REPLACE_IMAGES_ACCEPTED_RESPONSE = {
+    202: {
+        "description": "換圖任務已排入佇列",
+        "content": {
+            "application/json": {
+                "example": {
+                    "job_id": "j_rep123abc456",
+                    "type": "replace_images",
+                    "status": "queued",
+                    "status_url": "/v1/jobs/j_rep123abc456",
+                }
+            }
+        },
+    },
+    400: {
+        "description": (
+            "參數或檔案類型無效（EMPTY_REPLACEMENTS / TOO_MANY_REPLACEMENTS / "
+            "INVALID_RANGE / OVERLAPPING_RANGES / WRONG_FILE_TYPE）"
+        ),
+        "content": {
+            "application/json": {
+                "example": {
+                    "error": {
+                        "code": "OVERLAPPING_RANGES",
+                        "message": "replacements 的時段不可重疊: 1.0–3.0 與 2.0–4.0",
+                    }
+                }
+            }
+        },
+    },
+    403: {"description": "引用了他人的檔案（UNAUTHORIZED_FILE）"},
+    404: {"description": "檔案不存在或已過期（FILE_NOT_FOUND）"},
+}
+
 _IMPORT_URL_ACCEPTED_RESPONSE = {
     202: {
         "description": "匯入任務已排入佇列",
@@ -243,6 +301,39 @@ def _require_video_file(record: FileRecord) -> None:
 def _require_srt_file(record: FileRecord) -> None:
     if _suffix(record) not in SRT_EXTENSIONS:
         raise wrong_file_type("srt_file_id 必須是 .srt 檔")
+
+
+def _require_image_file(record: FileRecord) -> None:
+    if _suffix(record) not in IMAGE_EXTENSIONS:
+        raise wrong_file_type("image_file_id 必須是圖片檔（png / jpg / jpeg / webp）")
+
+
+def _validate_replacements(items: list[ReplacementItem]) -> None:
+    """時段本身是否合法，以及彼此是否重疊。"""
+    if not items:
+        raise empty_replacements()
+    if len(items) > MAX_REPLACEMENTS:
+        raise too_many_replacements(MAX_REPLACEMENTS)
+
+    for item in items:
+        if item.start < 0:
+            raise invalid_range(f"start 不可為負數: {item.start}")
+        if item.end <= item.start:
+            raise invalid_range(f"end 須大於 start: {item.start}–{item.end}")
+
+    ordered = sorted(items, key=lambda item: item.start)
+    for previous, current in zip(ordered, ordered[1:]):
+        if current.start < previous.end:
+            raise overlapping_ranges(
+                "replacements 的時段不可重疊: "
+                f"{previous.start}–{previous.end} 與 {current.start}–{current.end}"
+            )
+
+
+def _video_duration(record: FileRecord) -> float | None:
+    if not record.metadata_json:
+        return None
+    return json.loads(record.metadata_json).get("duration_sec")
 
 
 def _normalize_burn_style(
@@ -416,7 +507,7 @@ def create_extract_last_frame_job(
     description=(
         "由 server 下載指定 URL 的影片並註冊為 `file_id`（非同步 job）。\n\n"
         "- 預設僅允許 `https://`；`IMPORT_URL_ALLOW_HTTP=true` 可開放 `http://`\n"
-        "- 完成後 `result` 含 `file_id`（非 download_url），可接 merge / extract job\n"
+        "- 完成後 `result` 含 `file_id`（非 download_url），可接 merge / extract / 字幕 job\n"
         "- 大小上限與 upload 相同（`MAX_FILE_SIZE_MB`）\n"
         "- 失敗時常見 error code：`URL_NOT_ALLOWED`、`DOWNLOAD_FAILED`、"
         "`FILE_TOO_LARGE`、`UNSUPPORTED_FORMAT`"
@@ -446,10 +537,11 @@ def create_import_url_job(
     status_code=202,
     summary="建立有稿字幕任務",
     description=(
-        "對已上傳的影片產生標準 SRT 字幕（非同步 job）。\n\n"
+        "對已上傳的影片產生標準 SRT 字幕（非同步 job；兩段式燒字幕的第一段）。\n\n"
         "- 必填 `script`：一整段文字稿，字幕文字以稿為準（不跑 ASR、不簡繁轉換）\n"
         "- Worker 以 FunASR `fa-zh` 強制對齊時間軸，再依 `。！？!?；，` 分句\n"
-        "- 完成後 `result` 含 `file_id`（可交給 burn-subtitle）與 `.srt` 的 `download_url`\n"
+        "- 完成後 SRT 寫入 file registry：`result.file_id` 可交給 `POST /v1/jobs/burn-subtitle` 的 `srt_file_id`；"
+        "同時含 `.srt` 的 `download_url`\n"
         "- 失敗時常見 error code：`SCRIPT_REQUIRED`、`SCRIPT_EMPTY`、`SCRIPT_TOO_LONG`、"
         "`NO_AUDIO_STREAM`、`ALIGN_FAILED`、`FUNASR_UNAVAILABLE`"
     ),
@@ -481,12 +573,13 @@ def create_generate_subtitle_job(
     status_code=202,
     summary="建立燒字幕任務",
     description=(
-        "將 SRT 燒進影片畫面（非同步 job，必定重編碼 H.264）。\n\n"
-        "- 必填 `file_id`（影片）與 `srt_file_id`（`.srt`）\n"
+        "將 SRT 燒進影片畫面（非同步 job；兩段式的第二段，必定重編碼 H.264）。\n\n"
+        "- 必填 `file_id`（影片）與 `srt_file_id`（`.srt`：來自 generate-subtitle 的 `result.file_id`，或上傳的 `.srt`）\n"
         "- 可選 `font_size`（預設 48）、`margin_bottom`（預設 6）、"
         "`margin_unit`（`percent` 或 `px`，預設 `percent`）\n"
-        "- 對齊固定底部水平置中；字型為內建台北黑體；白字黑描邊\n"
-        "- 完成後 `result` 含 `*_burned.mp4` 的 `download_url`\n"
+        "- 樣式固定：內建台北黑體 Regular、底部水平置中、白字黑描邊；不可自訂字型／對齊／顏色\n"
+        "- `percent` 時離底像素 = `round(畫面高度 × margin_bottom / 100)`（例如 1080×1920、6% → 115px）\n"
+        "- 完成後 `result` 含 `*_burned.mp4` 的 `download_url`（不含新的 `file_id`）\n"
         "- 失敗時常見 error code：`WRONG_FILE_TYPE`、`INVALID_MARGIN`、"
         "`INVALID_FONT_SIZE`、`INVALID_SRT`、`FONT_UNAVAILABLE`、`FFMPEG_ERROR`"
     ),
@@ -514,15 +607,70 @@ def create_burn_subtitle_job(
     )
 
 
+@router.post(
+    "/replace-images",
+    status_code=202,
+    summary="建立換圖任務",
+    description=(
+        "在指定時段把影片畫面整框換成已上傳的靜態圖（非同步 job；必定重編碼 H.264）。\n\n"
+        "- 必填 `file_id`（影片）與 `replacements`（1–10 段）\n"
+        "- 每段必填 `image_file_id`（先以 `POST /v1/files` 上傳的圖）、`start`、`end`（秒，含頭含尾）\n"
+        "- 時段不可重疊；`end` 剛好等於下一段 `start` 可以。同一張圖可用在多段\n"
+        "- 每段為 contain：等比縮放到不超出畫面、置中、多餘處補黑邊，不裁切也不變形\n"
+        "- 音訊 stream copy、輸出時長與來源相同\n"
+        "- 完成後 `result` 同時含 `file_id`（成片已註冊進檔案庫，可接 burn-subtitle）"
+        "與 `*_replaced.mp4` 的 `download_url`\n"
+        "- 失敗時常見 error code：`WRONG_FILE_TYPE`、`INVALID_RANGE`、"
+        "`OVERLAPPING_RANGES`、`INVALID_IMAGE`、`FFMPEG_ERROR`"
+    ),
+    responses=_REPLACE_IMAGES_ACCEPTED_RESPONSE,
+)
+def create_replace_images_job(
+    body: ReplaceImagesRequest,
+    owner_key: str = Depends(require_api_key),
+    session: Session = Depends(get_session),
+) -> dict:
+    _validate_replacements(body.replacements)
+
+    video = _resolve_file(session, body.file_id, owner_key)
+    _require_video_file(video)
+
+    image_ids: list[str] = []
+    for item in body.replacements:
+        image = _resolve_file(session, item.image_file_id, owner_key)
+        _require_image_file(image)
+        if item.image_file_id not in image_ids:
+            image_ids.append(item.image_file_id)
+
+    duration = _video_duration(video)
+    if duration is not None:
+        longest_end = max(item.end for item in body.replacements)
+        if longest_end > duration:
+            raise invalid_range(f"end 超過影片長度 {duration} 秒: {longest_end}")
+
+    return _create_job(
+        session,
+        owner_key=owner_key,
+        job_type=JOB_TYPE_REPLACE_IMAGES,
+        file_ids=[body.file_id, *image_ids],
+        extra_input={
+            "replacements": [item.model_dump() for item in body.replacements]
+        },
+    )
+
+
 @router.get(
     "/{job_id}",
     summary="查詢任務狀態",
     description=(
         "輪詢任務狀態。狀態流轉：`queued → processing → done / failed`。\n\n"
-        "- `progress`：處理進度 0–100（merge / burn-subtitle 依 FFmpeg 時長；import-url 依下載 bytes；"
+        "- `progress`：處理進度 0–100（merge / burn-subtitle / replace-images 依 FFmpeg 時長；"
+        "import-url 依下載 bytes；"
         "generate-subtitle 依抽音／對齊階段；取幀任務極快，可能直接從 0 跳到 100）\n"
-        "- `done`：merge/extract/burn-subtitle 含 `result.download_url`；"
-        "generate-subtitle 含 `file_id` 與 `download_url`；import-url 含 `result.file_id`\n"
+        "- `done`：merge / extract / burn-subtitle 含 `result.download_url`；"
+        "generate-subtitle 含 `file_id`（可接 burn-subtitle）與 `download_url`；"
+        "replace-images 含 `file_id`（可接後續任務）與 `download_url`；"
+        "import-url 含 `result.file_id`\n"
         "- `failed`：回應含 `error.code` 與 `error.message`"
     ),
     responses={
@@ -676,6 +824,42 @@ def create_burn_subtitle_job(
                                 "error": {
                                     "code": "INVALID_SRT",
                                     "message": "SRT 沒有可用的字幕 cue",
+                                },
+                            },
+                        },
+                        "replace_done": {
+                            "summary": "換圖完成",
+                            "value": {
+                                "job_id": "j_rep123abc456",
+                                "type": "replace_images",
+                                "status": "done",
+                                "progress": 100,
+                                "created_at": "2026-08-26T02:00:00Z",
+                                "started_at": "2026-08-26T02:00:01Z",
+                                "completed_at": "2026-08-26T02:00:35Z",
+                                "result": {
+                                    "file_id": "f_rep789abc",
+                                    "download_url": "https://storage.example.com/uploads/f_rep789abc/original.mp4?sig=...",
+                                    "expires_at": "2026-08-27T02:00:35Z",
+                                    "filename": "talk_replaced.mp4",
+                                    "content_type": "video/mp4",
+                                    "size_bytes": 2048000,
+                                },
+                            },
+                        },
+                        "replace_failed": {
+                            "summary": "換圖失敗",
+                            "value": {
+                                "job_id": "j_rep123abc456",
+                                "type": "replace_images",
+                                "status": "failed",
+                                "progress": 15,
+                                "created_at": "2026-08-26T02:00:00Z",
+                                "started_at": "2026-08-26T02:00:01Z",
+                                "completed_at": "2026-08-26T02:00:03Z",
+                                "error": {
+                                    "code": "INVALID_IMAGE",
+                                    "message": "無法解讀圖片: slide.png",
                                 },
                             },
                         },

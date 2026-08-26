@@ -245,7 +245,7 @@ docker compose up --build
 
 | Method | Path | 用途 |
 |--------|------|------|
-| `POST` | `/v1/files` | 上傳影片或 `.srt`（multipart，欄位 `file`），回 `file_id` |
+| `POST` | `/v1/files` | 上傳影片、`.srt` 或圖片（multipart，欄位 `file`），回 `file_id` |
 | `GET` | `/v1/files/{file_id}` | 查檔案 metadata |
 | `DELETE` | `/v1/files/{file_id}` | 刪除檔案 |
 | `POST` | `/v1/jobs/merge` | 合併，`file_ids` 依**陣列順序**，內部自動選 copy/encode |
@@ -254,7 +254,8 @@ docker compose up --build
 | `POST` | `/v1/jobs/import-url` | 從 URL 匯入影片（非同步），done 回 `file_id` |
 | `POST` | `/v1/jobs/generate-subtitle` | 有稿產生 SRT（必填 `script`），done 回 `file_id` 與 `.srt` download URL |
 | `POST` | `/v1/jobs/burn-subtitle` | 把 SRT 燒進影片；可選字級與離底邊距離 |
-| `GET` | `/v1/jobs/{job_id}` | 查 job 狀態；含 `progress`；merge/extract/burn `done` 回 `download_url`，generate-subtitle 另回 `file_id`，import 回 `file_id` |
+| `POST` | `/v1/jobs/replace-images` | 指定時段把畫面整框換成靜態圖（1–10 段），done 回 `file_id` 與 download URL |
+| `GET` | `/v1/jobs/{job_id}` | 查 job 狀態；含 `progress`；merge/extract/burn `done` 回 `download_url`，generate-subtitle 與 replace-images 另回 `file_id`，import 回 `file_id` |
 | `GET` | `/health` | 健康檢查（含 ffmpeg 可用性） |
 
 所有 `/v1/*` 皆需 `Authorization: Bearer <api_key>`。
@@ -331,6 +332,28 @@ BURN=$(curl -s -X POST "$BASE/v1/jobs/burn-subtitle" -H "Authorization: Bearer $
 # -d '{"file_id":"...","srt_file_id":"...","font_size":48,"margin_bottom":6,"margin_unit":"percent"}'
 
 curl -s "$BASE/v1/jobs/$BURN" -H "Authorization: Bearer $KEY"
+```
+
+### 指定時段換成靜態圖
+
+一次可換 1–10 段，每段整框只剩該圖。圖以 contain 縮放：等比縮到不超出畫面、置中，多餘處補黑邊，不裁切也不變形。音訊 stream copy、輸出時長與來源相同；畫面必定重編碼 H.264。
+
+`done` 的 `result` 同時含 `file_id`（成片已註冊進檔案庫）與 `download_url`，因此可直接把 `file_id` 交給 burn-subtitle 等後續任務。換圖與燒字幕的先後由你決定：先換圖再燒字，字幕會蓋在圖上；先燒字再換圖，那幾秒連字一起被蓋掉。
+
+```bash
+# 1. 上傳圖片（png / jpg / jpeg / webp）
+IMG=$(curl -s -X POST "$BASE/v1/files" -H "Authorization: Bearer $KEY" \
+  -F "file=@slide.png" | python3 -c "import sys,json;print(json.load(sys.stdin)['file_id'])")
+
+# 2. 建立換圖 job（時段不可重疊；end 等於下一段 start 可以）
+REP=$(curl -s -X POST "$BASE/v1/jobs/replace-images" -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"file_id\": \"$F1\", \"replacements\": [{\"image_file_id\": \"$IMG\", \"start\": 3, \"end\": 5}]}" \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['job_id'])")
+
+# 3. 輪詢直到 done，取得 file_id 與 download_url
+curl -s "$BASE/v1/jobs/$REP" -H "Authorization: Bearer $KEY"
+# {"status": "done", "result": {"file_id": "f_...", "filename": "1_replaced.mp4", "download_url": "..."}}
 ```
 
 ### 檔案儲存後端（啟動時切換）
@@ -424,6 +447,14 @@ MergeVideo/
 | 找不到影片串流 | 輸入檔不含 video stream |
 
 ## Release Notes
+
+### v2.2.0
+
+- **指定時段換圖**：`POST /v1/jobs/replace-images`，一次可換 1–10 段，每段把畫面整框換成已上傳的靜態圖。圖以 contain 縮放（等比、置中、補黑邊，不裁不變形）；音訊 stream copy，輸出時長與來源相同
+- **換圖成片可直接接下一支任務**：`done` 的 `result` 同時含 `file_id` 與 `download_url`，可把 `file_id` 交給 burn-subtitle。換圖與燒字幕的先後由呼叫端決定
+- **上傳圖片**：`POST /v1/files` 接受 `.png` / `.jpg` / `.jpeg` / `.webp`
+- **字幕時間軸更準**：英文專名與數字（如 `Lookonchain`、`96191`）不再按字母數吃掉後面句子的時間戳；最後一句的結束時間會延伸到實際口播結束
+- **新增 error code**：`EMPTY_REPLACEMENTS`、`TOO_MANY_REPLACEMENTS`、`INVALID_RANGE`、`OVERLAPPING_RANGES`、`INVALID_IMAGE`
 
 ### v2.1.0
 

@@ -26,10 +26,16 @@ from api.services.burn_subtitle import burn_subtitles
 from api.services.cleanup import cleanup_expired
 from api.services.funasr_align import get_align_model
 from api.services.queue import get_queue
+from api.services.replace_images import (
+    Replacement,
+    ReplaceImagesError,
+    replace_images,
+)
 from api.services.storage import Storage, get_storage
 from api.services.subtitle import (
     SubtitleJobError,
     cues_from_alignment,
+    extend_last_cue_to_speech,
     format_srt,
     parse_timestamps,
 )
@@ -281,7 +287,8 @@ def _run_generate_subtitle(
         raise SubtitleJobError("ALIGN_FAILED", f"對齊失敗: {exc}") from exc
 
     timestamps = parse_timestamps(raw)
-    srt_text = format_srt(cues_from_alignment(script, timestamps))
+    cues = extend_last_cue_to_speech(cues_from_alignment(script, timestamps), wav)
+    srt_text = format_srt(cues)
 
     _set_progress(job, session, 90)
     filename = f"{stem}.srt"
@@ -372,6 +379,85 @@ def _run_burn_subtitle(
     }
 
 
+def _run_replace_images(
+    job: JobRecord, session: Session, storage: Storage, tmp: Path
+) -> dict:
+    payload = json.loads(job.input_json)
+    video_id: str = payload["file_ids"][0]
+    items: list[dict] = payload["replacements"]
+
+    _set_progress(job, session, 10)
+    video_record = session.get(FileRecord, video_id)
+    if video_record is None:
+        raise RuntimeError(f"輸入檔已不存在: {video_id}")
+
+    video_path = tmp / f"video{Path(video_record.storage_key).suffix}"
+    storage.fetch(video_record.storage_key, video_path)
+
+    replacements: list[Replacement] = []
+    for index, item in enumerate(items):
+        image_record = session.get(FileRecord, item["image_file_id"])
+        if image_record is None:
+            raise RuntimeError(f"輸入檔已不存在: {item['image_file_id']}")
+        image_path = tmp / f"image_{index:03d}{Path(image_record.storage_key).suffix}"
+        storage.fetch(image_record.storage_key, image_path)
+        replacements.append(
+            Replacement(
+                image_path=image_path,
+                start=float(item["start"]),
+                end=float(item["end"]),
+            )
+        )
+
+    _set_progress(job, session, 15)
+    stem = Path(video_record.filename).stem or "video"
+    filename = f"{stem}_replaced.mp4"
+    output_path = tmp / filename
+
+    updater = _make_progress_updater(job, session)
+
+    def on_encode(fraction: float) -> None:
+        updater(0.15 + fraction * 0.80)
+
+    replace_images(
+        video_path,
+        replacements,
+        output_path,
+        work_dir=tmp,
+        progress_callback=on_encode,
+    )
+
+    _set_progress(job, session, 98)
+    settings = get_settings()
+    file_id = f"f_{uuid.uuid4().hex[:12]}"
+    storage_key = f"uploads/{file_id}/original.mp4"
+    storage.put(storage_key, output_path, "video/mp4")
+
+    now = utcnow()
+    session.add(
+        FileRecord(
+            file_id=file_id,
+            owner_key=job.owner_key,
+            filename=filename,
+            storage_key=storage_key,
+            size_bytes=output_path.stat().st_size,
+            content_type="video/mp4",
+            metadata_json=_probe_metadata(output_path),
+            created_at=now,
+            expires_at=compute_file_expires_at(now, settings.file_ttl_hours),
+        )
+    )
+    session.flush()
+
+    return {
+        "file_id": file_id,
+        "storage_key": storage_key,
+        "filename": filename,
+        "content_type": "video/mp4",
+        "size_bytes": output_path.stat().st_size,
+    }
+
+
 def _unpin_files(session: Session, job: JobRecord) -> None:
     payload = json.loads(job.input_json)
     for file_id in set(payload.get("file_ids", [])):
@@ -396,6 +482,8 @@ def process_job(job: JobRecord, session: Session, storage: Storage) -> None:
                 result = _run_generate_subtitle(job, session, storage, tmp)
             elif job.type == "burn_subtitle":
                 result = _run_burn_subtitle(job, session, storage, tmp)
+            elif job.type == "replace_images":
+                result = _run_replace_images(job, session, storage, tmp)
             else:
                 raise RuntimeError(f"未知的任務類型: {job.type}")
 
@@ -406,7 +494,7 @@ def process_job(job: JobRecord, session: Session, storage: Storage) -> None:
         job.status = JobStatus.FAILED
         job.error_code = exc.code
         job.error_message = exc.message
-    except SubtitleJobError as exc:
+    except (SubtitleJobError, ReplaceImagesError) as exc:
         job.status = JobStatus.FAILED
         job.error_code = exc.code
         job.error_message = exc.message

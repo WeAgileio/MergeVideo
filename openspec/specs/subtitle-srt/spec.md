@@ -53,12 +53,24 @@ The pipeline SHALL split the script into cues on `。` `！` `？` `!` `?` `；`
 
 ### Requirement: Cue timestamps from character alignment
 
-Each cue's start time SHALL be the start of the first aligned timestamp in that cue's character slice. Each cue's end time SHALL be the end of the last aligned timestamp in that slice. Times SHALL be expressed in milliseconds internally and formatted as SRT `HH:MM:SS,mmm`.
+Each cue's start time SHALL be the start of the first aligned timestamp in that cue's slice. Each cue's end time SHALL be the end of the last aligned timestamp in that slice. Times SHALL be expressed in milliseconds internally and formatted as SRT `HH:MM:SS,mmm`.
+
+When the aligner returns one timestamp per character (or per non-space character), slices SHALL follow character counts. When it returns fewer timestamps than characters, consecutive ASCII non-space characters SHALL count as one alignment unit so Latin names and numbers do not consume later cues' timestamps.
 
 #### Scenario: Cue uses first and last character times
 
 - **WHEN** a sentence's characters have timestamps `[[100, 200], [200, 350], [350, 400]]`
 - **THEN** that cue's time range is `00:00:00,100 --> 00:00:00,400`
+
+#### Scenario: ASCII run is one alignment unit
+
+- **WHEN** the script is `據Lookonchain監測，` and the aligner returns one timestamp per alignment unit
+- **THEN** that cue is assigned 5 timestamps (`據`, `Lookonchain`, `監`, `測`, `，`), not 15
+
+#### Scenario: Last cue extends through trailing speech
+
+- **WHEN** the aligner's last timestamp ends before remaining speech on the wav, and that speech starts within 2 seconds of the last cue end
+- **THEN** the last cue's end time is extended to the end of that trailing speech
 
 #### Scenario: No timestamps fail alignment
 
@@ -78,3 +90,12 @@ The output SHALL be UTF-8 (no BOM) standard SRT: sequential integer index starti
 
 - **WHEN** the source filename stem is `talk`
 - **THEN** the result filename is `talk.srt`
+
+### Requirement: Aligned SRT is registered as a file
+
+After successful alignment, the system SHALL persist the generated SRT in the file registry as a new object owned by the same API key as the job. The registered file SHALL have `content_type` `application/x-subrip` and a filename ending in `.srt`. The SRT SHALL remain addressable by `file_id` after the job completes so a later burn-in job can use it as input. File TTL SHALL follow the same `FILE_TTL_HOURS` rules as uploaded files.
+
+#### Scenario: Alignment produces a registry file
+
+- **WHEN** generate-subtitle alignment succeeds for a video whose stem is `talk`
+- **THEN** a new file record exists with filename `talk.srt` and can be fetched by the returned `file_id`

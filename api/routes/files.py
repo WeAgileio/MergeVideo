@@ -23,7 +23,14 @@ router = APIRouter(prefix="/v1/files", tags=["files"])
 
 SRT_EXTENSIONS = {".srt"}
 SRT_CONTENT_TYPE = "application/x-subrip"
-_UPLOAD_EXTENSIONS = VIDEO_EXTENSIONS | SRT_EXTENSIONS
+IMAGE_CONTENT_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
+IMAGE_EXTENSIONS = set(IMAGE_CONTENT_TYPES)
+_UPLOAD_EXTENSIONS = VIDEO_EXTENSIONS | SRT_EXTENSIONS | IMAGE_EXTENSIONS
 
 _CHUNK_SIZE = 1024 * 1024
 
@@ -79,20 +86,47 @@ _UPLOAD_RESPONSES = {
         "description": "上傳成功",
         "content": {
             "application/json": {
-                "example": {
-                    "file_id": "f_7x9k2m1a3b4c",
-                    "filename": "1.mp4",
-                    "size_bytes": 52428800,
-                    "content_type": "video/mp4",
-                    "created_at": "2026-07-29T02:00:00Z",
-                    "expires_at": None,
-                    "metadata": {
-                        "width": 2560,
-                        "height": 1440,
-                        "fps": 24.0,
-                        "codec": "h264",
-                        "duration_sec": 12.5,
-                        "has_audio": True,
+                "examples": {
+                    "video": {
+                        "summary": "影片",
+                        "value": {
+                            "file_id": "f_7x9k2m1a3b4c",
+                            "filename": "1.mp4",
+                            "size_bytes": 52428800,
+                            "content_type": "video/mp4",
+                            "created_at": "2026-07-29T02:00:00Z",
+                            "expires_at": None,
+                            "metadata": {
+                                "width": 2560,
+                                "height": 1440,
+                                "fps": 24.0,
+                                "codec": "h264",
+                                "duration_sec": 12.5,
+                                "has_audio": True,
+                            },
+                        },
+                    },
+                    "srt": {
+                        "summary": "SRT 字幕",
+                        "value": {
+                            "file_id": "f_srt111",
+                            "filename": "talk.srt",
+                            "size_bytes": 512,
+                            "content_type": "application/x-subrip",
+                            "created_at": "2026-08-26T02:00:00Z",
+                            "expires_at": None,
+                        },
+                    },
+                    "image": {
+                        "summary": "靜態圖",
+                        "value": {
+                            "file_id": "f_img222",
+                            "filename": "slide.png",
+                            "size_bytes": 204800,
+                            "content_type": "image/png",
+                            "created_at": "2026-08-26T02:00:00Z",
+                            "expires_at": None,
+                        },
                     },
                 }
             }
@@ -106,11 +140,15 @@ _UPLOAD_RESPONSES = {
 @router.post(
     "",
     status_code=201,
-    summary="上傳影片或 SRT",
+    summary="上傳影片、SRT 或圖片",
     description=(
         "以 multipart/form-data 上傳單一檔案（欄位名 `file`），回傳 `file_id` 供後續任務引用。\n\n"
         "- 支援影片：mp4 / mov / webm / mkv / avi / m4v\n"
-        "- 支援字幕：srt（`content_type: application/x-subrip`，可供 burn-subtitle 引用）\n"
+        "- 支援字幕：`.srt`（`content_type: application/x-subrip`，不跑 ffprobe；"
+        "可作為 `POST /v1/jobs/burn-subtitle` 的 `srt_file_id`）\n"
+        "- 支援圖片：`.png` / `.jpg` / `.jpeg` / `.webp`（`content_type` 為 "
+        "`image/png`、`image/jpeg`、`image/webp`，不跑 ffprobe；"
+        "可作為 `POST /v1/jobs/replace-images` 的 `image_file_id`）\n"
         "- 單檔大小上限由 `MAX_FILE_SIZE_MB` 控制（預設 200 MB）\n"
         "- `FILE_TTL_HOURS=0`（預設）表示永不過期；> 0 時依小時數邏輯過期，"
         "被進行中任務引用時不會過期"
@@ -134,7 +172,13 @@ async def upload_file(
         )
 
     is_srt = suffix in SRT_EXTENSIONS
-    content_type = SRT_CONTENT_TYPE if is_srt else "video/mp4"
+    is_image = suffix in IMAGE_EXTENSIONS
+    if is_srt:
+        content_type = SRT_CONTENT_TYPE
+    elif is_image:
+        content_type = IMAGE_CONTENT_TYPES[suffix]
+    else:
+        content_type = "video/mp4"
 
     size = 0
     tmp_path: Path | None = None
@@ -166,7 +210,7 @@ async def upload_file(
             storage_key=storage_key,
             size_bytes=size,
             content_type=content_type,
-            metadata_json=None if is_srt else _probe_metadata(tmp_path),
+            metadata_json=None if (is_srt or is_image) else _probe_metadata(tmp_path),
             created_at=now,
             expires_at=compute_file_expires_at(now, settings.file_ttl_hours),
         )
@@ -181,7 +225,12 @@ async def upload_file(
 @router.get(
     "/{file_id}",
     summary="查詢檔案",
-    description="回傳檔案 metadata（含上傳時 ffprobe 解析結果）。僅檔案擁有者可查詢。",
+    description=(
+        "回傳檔案 metadata。僅檔案擁有者可查詢。\n\n"
+        "- 影片：可能含上傳時 ffprobe 解析的 `metadata`（寬高、fps、codec 等）\n"
+        "- `.srt`：`content_type` 為 `application/x-subrip`，無影片 metadata\n"
+        "- 圖片：`content_type` 為 `image/png`、`image/jpeg` 或 `image/webp`，無影片 metadata"
+    ),
     responses={404: {"description": "檔案不存在、已過期或非本人所有（FILE_NOT_FOUND）"}},
 )
 def get_file(
